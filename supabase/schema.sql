@@ -36,12 +36,13 @@ create table if not exists public.events (
   id uuid primary key default gen_random_uuid(),
   started_at timestamptz not null default now(),
   ended_at timestamptz,
-  verdict text not null default 'insufficient' check (verdict in ('known', 'ambiguous', 'unknown', 'insufficient')),
+  verdict text not null default 'person' check (verdict in ('person', 'known', 'ambiguous', 'unknown', 'insufficient')),
   person_id uuid references public.profiles (id) on delete set null,
   person_name text,
   confidence numeric,
   features jsonb not null default '{}'::jsonb,         -- summarizeTrack() output
-  clip_path text,                                       -- path inside the "clips" bucket
+  clip_path text,                                       -- first clip part inside the "clips" bucket
+  clip_paths jsonb not null default '[]'::jsonb,        -- all parts of a long visit, in order
   snapshot_path text,
   alarm_triggered boolean not null default false,
   lock_triggered boolean not null default false,
@@ -49,6 +50,10 @@ create table if not exists public.events (
   camera_label text
 );
 create index if not exists events_started_at_idx on public.events (started_at desc);
+-- Existing databases:
+alter table public.events add column if not exists clip_paths jsonb not null default '[]'::jsonb;
+alter table public.events drop constraint if exists events_verdict_check;
+alter table public.events add constraint events_verdict_check check (verdict in ('person', 'known', 'ambiguous', 'unknown', 'insufficient'));
 
 -- ---------------------------------------------------------------- cameras / calibration
 create table if not exists public.cameras (

@@ -35,7 +35,7 @@
               <span id="armedBadge" class="badge">Disarmed</span>
             </div>
             <div id="alarmBanner" class="alarm-banner hidden" role="alert">
-              <strong>⚠️ Unknown person in the room</strong>
+              <strong id="alarmText">⚠️ Someone is in the room</strong>
               <button type="button" id="btnDismissAlarm">Dismiss</button>
             </div>
             <div id="stagePlaceholder" class="stage-placeholder">
@@ -125,10 +125,10 @@
     <!-- ===================== EVENTS ===================== -->
     <section id="view-events" class="view">
       <div class="section-head">
-        <h2>Events</h2>
+        <h2>Visits <span id="eventsCount" class="muted small"></span></h2>
         <button type="button" id="btnRefreshEvents">Refresh</button>
       </div>
-      <p class="muted">Every visit is logged with a snapshot and clip. Confirming who it really was teaches the identifier: the measured height, build, hair and face samples are added to that person.</p>
+      <p class="muted" id="eventsIntro">Every visit is logged from the moment a person is seen until they leave, with a snapshot and the clip.</p>
       <div id="eventsList" class="events"></div>
     </section>
 
@@ -161,6 +161,17 @@
     <section id="view-settings" class="view">
       <form id="settingsForm" class="form settings" autocomplete="off">
         <fieldset>
+          <legend>What the camera does</legend>
+          <label>Mode
+            <select name="mode">
+              <option value="presence">Record every visit: detect a person, save the clip from entering to leaving, alarm when armed</option>
+              <option value="identify">Also identify who it is (advanced: enroll people, calibrate height, face models)</option>
+            </select>
+          </label>
+          <p class="muted small">"Record every visit" hides the People and Calibrate tabs and skips the face and hair models, so the camera starts faster and uses less power. Changing the mode stops the camera; start it again afterwards.</p>
+        </fieldset>
+
+        <fieldset>
           <legend>Camera</legend>
           <label>Camera <select name="cameraDeviceId" id="cameraSelect"><option value="">Default camera</option></select></label>
           <label class="check"><input type="checkbox" name="mirror"> Mirror the preview</label>
@@ -172,7 +183,7 @@
           <div class="row">
             <label>Match threshold <input name="matchThreshold" type="number" min="0.3" max="0.95" step="0.01"></label>
             <label>Margin over runner-up <input name="matchMargin" type="number" min="0" max="0.5" step="0.01"></label>
-            <label>Seconds unknown before alarm <input name="unknownGraceSec" type="number" min="0" max="60" step="0.5"></label>
+            <label>Seconds present before the alarm <input name="unknownGraceSec" type="number" min="0" max="60" step="0.5"></label>
           </div>
         </fieldset>
 
@@ -180,14 +191,14 @@
           <legend>Recording</legend>
           <label class="check"><input type="checkbox" name="recordClips"> Record a clip whenever someone is in the room</label>
           <div class="row">
-            <label>Max clip length (s) <input name="clipMaxSec" type="number" min="5" max="600" step="1"></label>
+            <label>Split clips longer than (s) <input name="clipMaxSec" type="number" min="5" max="1800" step="1"></label>
             <label>Keep recording after room empties (s) <input name="clipTailSec" type="number" min="0" max="60" step="1"></label>
           </div>
         </fieldset>
 
         <fieldset>
           <legend>Alarm, notifications and door lock</legend>
-          <label class="check"><input type="checkbox" name="alarmEnabled"> Sound the siren for unknown people (when armed)</label>
+          <label class="check"><input type="checkbox" name="alarmEnabled"> Sound the siren when armed (any person in "record every visit" mode, unknown people in "identify" mode)</label>
           <label>Siren duration (s) <input name="alarmDurationSec" type="number" min="1" max="300" step="1"></label>
           <label class="check"><input type="checkbox" name="notifyEnabled"> Browser notifications <button type="button" id="btnRequestNotify" class="inline">Allow</button></label>
           <label>Door-lock webhook URL <input name="lockWebhookUrl" type="url" placeholder="https://your-home-assistant/api/webhook/lock-door"></label>

@@ -106,11 +106,16 @@ await routeDir(/cdn\.jsdelivr\.net\/npm\/@vladmandic\/face-api@[^/]+\/model\/([^
 await page.route(REMOTE.poseModel, (route) => serveLocal(route, LOCAL.poseModel));
 await page.route(REMOTE.segModel, (route) => serveLocal(route, LOCAL.segModel));
 
+// Scenarios: 'presence' (default mode: record every visit), 'identify' (advanced mode), or 'all'.
+const scenario = process.env.E2E_SCENARIO || 'all';
 // Optional: force the face-model runtime (E2E_TF_BACKEND=wasm exercises the vendored WASM binaries).
 const forcedBackend = process.env.E2E_TF_BACKEND || '';
-await page.addInitScript((backend) => {
-  if (backend) localStorage.setItem('hr.settings.v1', JSON.stringify({ tfBackend: backend }));
-}, forcedBackend);
+const initialMode = scenario === 'identify' ? 'identify' : 'presence';
+await page.addInitScript(({ backend, mode }) => {
+  if (!localStorage.getItem('hr.settings.v1')) {
+    localStorage.setItem('hr.settings.v1', JSON.stringify({ ...(backend ? { tfBackend: backend } : {}), mode }));
+  }
+}, { backend: forcedBackend, mode: initialMode });
 
 // Stubbed Anthropic API: the app talks to it through the vendored SDK bundle.
 let aiStub = { mode: 'unknown', calls: 0, lastBody: null };
@@ -159,10 +164,64 @@ await page.addInitScript(() => {
   });
 });
 
-try {
+async function presenceScenario() {
+  step('--- scenario: record every visit (default mode) ---');
   await page.goto(`${url}/`);
   await waitFor(page, () => !!window.roomGuard, { label: 'app boot', timeout: 15000 });
-  step('app booted');
+  const hiddenTabs = await page.evaluate(() => ['people', 'calibrate'].every((v) => document.querySelector(`#tabs button[data-view="${v}"]`).classList.contains('hidden')));
+  assert(hiddenTabs, 'People and Calibrate tabs are hidden in the default mode');
+  await page.click('#btnStart');
+  await waitFor(page, () => window.roomGuard.state.running, { label: 'camera + pose model', timeout: 180000 });
+  const eng = await page.evaluate(() => ({ faceReady: window.roomGuard.state.engine.faceReady, segmenter: !!window.roomGuard.state.engine.segmenter }));
+  assert(!eng.faceReady && !eng.segmenter, 'face and hair models are not loaded in the default mode');
+  const det = await waitFor(page, () => {
+    const t = window.roomGuard.state.tracker.tracks[0];
+    return t ? { verdict: t.identity.verdict, frames: t.frames } : null;
+  }, { label: 'a tracked person', timeout: 90000 });
+  step(`tracked: ${JSON.stringify(det)}`);
+  await waitFor(page, () => document.getElementById('presence').textContent.includes('Person'), { label: 'presence panel shows Person', timeout: 30000 });
+  await waitFor(page, () => window.roomGuard.state.session && window.roomGuard.state.recorder.recording, { label: 'recording started on entry', timeout: 30000 });
+  step('recording started when the person appeared');
+
+  await page.evaluate(() => { window.roomGuard.state.settings.unknownGraceSec = 1; });
+  await page.click('#btnArm');
+  const alarm = await waitFor(page, () => window.roomGuard.state.alarmActive, { label: 'alarm for any person', timeout: 60000 });
+  assert(alarm === true, 'armed camera alarms for any person present');
+  assert((await page.textContent('#alarmText')).includes('Someone is in the room'), 'alarm text is about presence, not identity');
+  await page.screenshot({ path: path.join(cache, 'presence-alarm.png') });
+  await page.click('#btnDismissAlarm');
+  await page.click('#btnArm'); // disarm again so later scenarios start disarmed
+
+  await page.click('#btnStop');
+  await waitFor(page, () => !window.roomGuard.state.running, { label: 'camera stopped', timeout: 20000 });
+  await page.waitForTimeout(1500);
+  const events = await page.evaluate(async () => {
+    const list = await window.roomGuard.store.listEvents();
+    return list.map((e) => ({ verdict: e.verdict, person: e.personName, entered: e.startedAt, left: e.endedAt, clip: e.clipPath, parts: e.clipPaths?.length, snapshot: e.snapshotPath, alarm: e.alarmTriggered }));
+  });
+  step(`visits: ${JSON.stringify(events)}`);
+  assert(events.length >= 1 && events[0].verdict === 'person' && !events[0].person, 'visit logged without naming anyone');
+  assert(events[0].entered && events[0].left && new Date(events[0].left) > new Date(events[0].entered), 'visit has entered and left times');
+  assert(events[0].clip && events[0].parts >= 1 && events[0].snapshot, 'visit has a clip and a snapshot');
+  await page.click('#tabs button[data-view="events"]');
+  await waitFor(page, () => document.querySelectorAll('#eventsList .event').length >= 1, { label: 'visits rendered', timeout: 10000 });
+  const card = await page.evaluate(() => document.querySelector('#eventsList .event').textContent);
+  assert(card.includes('Visit') && !card.includes('Who was it?'), 'visit card has no identification controls');
+  await page.screenshot({ path: path.join(cache, 'presence-events.png'), fullPage: true });
+}
+
+async function identifyScenario() {
+  step('--- scenario: identify people (advanced mode) ---');
+  await page.goto(`${url}/`);
+  await waitFor(page, () => !!window.roomGuard, { label: 'app boot', timeout: 15000 });
+  await page.evaluate(() => {
+    const s = JSON.parse(localStorage.getItem('hr.settings.v1') || '{}');
+    s.mode = 'identify';
+    localStorage.setItem('hr.settings.v1', JSON.stringify(s));
+  });
+  await page.reload();
+  await waitFor(page, () => !!window.roomGuard && window.roomGuard.state.settings.mode === 'identify', { label: 'identify mode', timeout: 15000 });
+  step('app booted in identify mode');
 
   await page.click('#btnStart');
   await waitFor(page, () => window.roomGuard.state.running, { label: 'camera + models', timeout: 180000 });
@@ -335,6 +394,11 @@ try {
   await page.waitForTimeout(800);
   await page.screenshot({ path: path.join(cache, 'events.png'), fullPage: true });
   step('events view rendered');
+}
+
+try {
+  if (scenario === 'presence' || scenario === 'all') await presenceScenario();
+  if (scenario === 'identify' || scenario === 'all') await identifyScenario();
   assert(externalRequests.length === 0, `no unexpected network requests (got ${JSON.stringify(externalRequests.slice(0, 5))})`);
 } catch (e) {
   fail(e.stack || String(e));

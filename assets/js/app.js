@@ -16,6 +16,15 @@ const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${M
 const fmtTime = (d) => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 const fmtDate = (d) => new Date(d).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
 const pct = (x) => `${Math.round((x || 0) * 100)}%`;
+const fmtDuration = (ms) => {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return `${sec} s`;
+  const m = Math.floor(sec / 60);
+  const r = sec % 60;
+  if (m < 60) return r ? `${m} min ${r} s` : `${m} min`;
+  return `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+const presenceMode = () => state.settings.mode !== 'identify';
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 const els = {};
@@ -72,7 +81,21 @@ function log(message, kind = '') {
   while (els.liveLog.children.length > 40) els.liveLog.lastChild.remove();
 }
 
+function applyMode() {
+  const simple = presenceMode();
+  for (const b of els.tabs.querySelectorAll('button')) {
+    if (b.dataset.view === 'people' || b.dataset.view === 'calibrate') b.classList.toggle('hidden', simple);
+  }
+  if (simple && (state.view === 'people' || state.view === 'calibrate')) showView('live');
+  if (els.eventsIntro) {
+    els.eventsIntro.textContent = simple
+      ? 'Every visit is logged from the moment a person is seen until they leave, with a snapshot and the clip.'
+      : 'Every visit is logged with a snapshot and clip. Confirming who it really was teaches the identifier: the measured height, build, hair and face samples are added to that person.';
+  }
+}
+
 function showView(name) {
+  if (presenceMode() && (name === 'people' || name === 'calibrate')) name = 'live';
   state.view = name;
   for (const b of els.tabs.querySelectorAll('button')) b.classList.toggle('active', b.dataset.view === name);
   for (const v of document.querySelectorAll('.view')) v.classList.toggle('active', v.id === `view-${name}`);
@@ -106,6 +129,8 @@ function hairLabel(index) {
 function labelFor(identity) {
   if (!identity) return 'Identifying…';
   switch (identity.verdict) {
+    case 'person':
+      return 'Person';
     case 'known':
       return `${identity.name} ${pct(identity.confidence)}${identity.viaAi ? ' · Claude' : ''}`;
     case 'ambiguous':
@@ -119,6 +144,7 @@ function labelFor(identity) {
 
 function colorFor(identity) {
   if (!identity) return '#9ca3af';
+  if (identity.verdict === 'person') return '#60a5fa';
   if (identity.verdict === 'known') return profileById(identity.profileId)?.color || '#4ade80';
   if (identity.verdict === 'ambiguous') return '#fbbf24';
   if (identity.verdict === 'unknown') return '#f87171';
@@ -266,10 +292,12 @@ async function ensureEngine() {
         blockTelemetry: s.blockTelemetry !== false,
         faceDetector: s.faceDetector || 'ssd',
         tfBackend: s.tfBackend || 'auto',
+        withFaces: !presenceMode(),
+        withHair: !presenceMode(),
       })
       .then(() => {
         const d = state.engine.diagnostics();
-        log(`Models ready: face runtime ${d.tfBackend}${d.float32 === false ? ' (16-bit)' : ''}, detector ${d.faceDetector}, pose ${d.poseDelegate}`);
+        log(presenceMode() ? `Models ready: pose ${d.poseDelegate}` : `Models ready: face runtime ${d.tfBackend}${d.float32 === false ? ' (16-bit)' : ''}, detector ${d.faceDetector}, pose ${d.poseDelegate}`);
         renderDiagnostics();
       })
       .finally(() => {
@@ -360,8 +388,9 @@ function processFrame(now) {
   const poses = engine.detectPoses(video, now);
   ema('pose', performance.now() - tPose);
   state.frame += 1;
+  const simple = presenceMode();
 
-  if (poses.length) {
+  if (poses.length && !simple) {
     if (!state.mask || state.frame % Math.max(1, s.hairEveryFrames) === 0) {
       const tHair = performance.now();
       state.mask = engine.segmentHair(video, now);
@@ -386,17 +415,21 @@ function processFrame(now) {
     state.mask = null;
   }
 
-  const facesFresh = now - state.faces.at < 1500 ? state.faces.list : [];
+  const facesFresh = !simple && now - state.faces.at < 1500 ? state.faces.list : [];
   const metricsList = poses.map((lm) => bodyMetrics(lm, W, H));
   const faceFor = matchFacesToPoses(facesFresh, metricsList);
   const detections = [];
   metricsList.forEach((m0, i) => {
     if (!m0) return;
-    const hair = state.mask ? hairMetrics(state.mask.data, state.mask.width, state.mask.height, m0, W, H) : null;
+    const hair = !simple && state.mask ? hairMetrics(state.mask.data, state.mask.width, state.mask.height, m0, W, H) : null;
     const m = refineHeadTop(m0, hair);
-    const face = faceFor[i];
-    const obs = buildObservation({ metrics: m, hair, calib: state.calibration, faceDescriptor: face?.descriptor || null, frameHeight: H });
-    const result = identify(obs, state.profiles, { threshold: s.matchThreshold, margin: s.matchMargin });
+    const face = faceFor[i] || null;
+    const obs = simple
+      ? { heightCm: null, heightExtrapolated: false, build: null, hair: null, faceDescriptor: null }
+      : buildObservation({ metrics: m, hair, calib: state.calibration, faceDescriptor: face?.descriptor || null, frameHeight: H });
+    const result = simple
+      ? { verdict: 'person', best: null, confidence: 1, ranked: [] }
+      : identify(obs, state.profiles, { threshold: s.matchThreshold, margin: s.matchMargin });
     detections.push({ box: m.box, obs, result, metrics: m, hair, face });
   });
   state.lastDetections = detections;
@@ -444,10 +477,22 @@ function handlePresence(active, ended, now) {
     }
     if (!p.aiTried && aiUsable() && (tr.identity.stable || now - tr.firstSeen > 2500)) {
       p.aiTried = true;
-      const wantOpinion = s.aiSecondOpinion && tr.identity.verdict !== 'known';
+      const wantOpinion = !presenceMode() && s.aiSecondOpinion && tr.identity.verdict !== 'known';
       if (s.aiDescribeVisits || wantOpinion) askClaudeAboutTrack(tr, p, { reason: wantOpinion ? 'unsure' : 'describe' });
     }
     const id = effectiveIdentity(tr);
+    if (presenceMode()) {
+      if (!p.notified && tr.identity.stable) {
+        p.notified = true;
+        log('Person entered the room');
+        if (s.notifyEnabled) notify('Room Guard', 'Someone entered your room');
+      }
+      if (state.armed && !p.alarmed && tr.identity.stable && now - tr.firstSeen >= s.unknownGraceSec * 1000) {
+        p.alarmed = true;
+        fireAlarm(tr, p, 'Someone is in the room');
+      }
+      continue;
+    }
     if (id.verdict === 'known' && (id.stable || id.viaAi) && !p.notified) {
       p.notified = true;
       log(`${id.name} is in the room (${pct(id.confidence)}${id.viaAi ? ', Claude' : ''})`);
@@ -457,7 +502,7 @@ function handlePresence(active, ended, now) {
     const aiHold = p.aiPending && now - tr.firstSeen < 20000; // give Claude up to 20 s to answer before alarming
     if (state.armed && id.verdict === 'unknown' && !aiHold && tr.unknownSince != null && now - tr.unknownSince >= s.unknownGraceSec * 1000 && !p.alarmed) {
       p.alarmed = true;
-      fireAlarm(tr, p);
+      fireAlarm(tr, p, 'Unknown person in the room');
     }
   }
   for (const tr of ended) {
@@ -476,6 +521,7 @@ function handlePresence(active, ended, now) {
 /** The camera's verdict, upgraded by Claude's attribute-based match when the camera itself is not sure. */
 function effectiveIdentity(tr, p = state.presence.get(tr.id)) {
   const id = tr.identity;
+  if (presenceMode()) return { ...id, verdict: 'person', profileId: null, name: null, confidence: 1, ranked: [] };
   if (p?.aiIdentity && id.verdict !== 'known') {
     return { ...id, verdict: 'known', profileId: p.aiIdentity.profileId, name: p.aiIdentity.name, confidence: p.aiIdentity.confidence, viaAi: true };
   }
@@ -615,19 +661,20 @@ async function closeEvent(tr, p) {
   } catch (e) {
     log(`Could not save event: ${e.message}`, 'error');
   }
-  log(`${labelFor(id)} left`);
+  log(`${labelFor(id)} left after ${fmtDuration(tr.lastSeen - tr.firstSeen)}`);
   if (state.view === 'events') renderEvents();
 }
 
-async function fireAlarm(tr, p) {
+async function fireAlarm(tr, p, message = 'Someone is in the room') {
   const s = state.settings;
-  log('Unknown person in the room: alarm', 'error');
+  log(`${message}: alarm`, 'error');
   state.alarmActive = true;
+  els.alarmText.textContent = `⚠️ ${message}`;
   els.alarmBanner.classList.remove('hidden');
   if (s.alarmEnabled) siren.start(s.alarmDurationSec);
-  if (s.notifyEnabled) notify('⚠️ Room Guard', 'Unknown person detected in your room');
+  if (s.notifyEnabled) notify('⚠️ Room Guard', message);
   if (s.lockOnUnknown && s.lockWebhookUrl) {
-    const r = await triggerDoorLock({ url: s.lockWebhookUrl, token: s.lockWebhookToken, reason: 'unknown person detected', extra: { trackId: tr.id } });
+    const r = await triggerDoorLock({ url: s.lockWebhookUrl, token: s.lockWebhookToken, reason: message, extra: { trackId: tr.id } });
     p.locked = !!r.ok;
     log(r.ok ? 'Door lock requested' : `Door lock failed: ${r.message}`, r.ok ? 'warn' : 'error');
   }
@@ -641,12 +688,35 @@ function dismissAlarm() {
 }
 
 // ---------------------------------------------------------------- recording
+// A recording session spans one occupancy (first person seen until the room
+// has been empty for clipTailSec). Long sessions are saved in several parts.
 function ensureRecording() {
   const s = state.settings;
-  if (!s.recordClips || !state.recorder?.supported || state.session) return;
-  if (!state.recorder.start({ startedAt: Date.now() })) return;
-  state.session = { id: uuid(), startedAt: Date.now(), eventIds: [] };
-  els.recBadge.classList.remove('hidden');
+  if (!s.recordClips || !state.recorder?.supported) return;
+  if (!state.session) state.session = { id: uuid(), startedAt: Date.now(), eventIds: [], clipPaths: [], part: 0 };
+  if (!state.recorder.recording && !state.session.finishing) {
+    if (!state.recorder.start({ sessionId: state.session.id, part: state.session.part + 1 })) return;
+    state.session.part += 1;
+    els.recBadge.classList.remove('hidden');
+  }
+}
+
+async function finishRecordingPart(session) {
+  session.finishing = true;
+  try {
+    const clip = await state.recorder.stop();
+    if (!clip || clip.blob.size < 2000) return;
+    const path = clipPathFor(new Date(clip.startedAt), clip.extension, 'visit', session.part > 1 ? `part${session.part}` : 'clip');
+    await store.uploadMedia(clip.blob, path, clip.mimeType);
+    session.clipPaths.push(path);
+    for (const id of session.eventIds) await store.updateEvent(id, { clipPath: session.clipPaths[0], clipPaths: [...session.clipPaths] });
+    log(`Clip saved (${(clip.blob.size / 1048576).toFixed(1)} MB, ${fmtDuration(clip.durationMs)}${session.part > 1 ? `, part ${session.part}` : ''})`);
+    if (state.view === 'events') renderEvents();
+  } catch (e) {
+    log(`Clip save failed: ${e.message}`, 'error');
+  } finally {
+    session.finishing = false;
+  }
 }
 
 async function finalizeRecording() {
@@ -654,23 +724,14 @@ async function finalizeRecording() {
   if (!session) return;
   state.session = null;
   els.recBadge.classList.add('hidden');
-  const clip = await state.recorder.stop();
-  if (!clip || clip.blob.size < 2000) return;
-  const path = clipPathFor(new Date(clip.startedAt), clip.extension, 'visit', 'clip');
-  try {
-    await store.uploadMedia(clip.blob, path, clip.mimeType);
-    for (const id of session.eventIds) await store.updateEvent(id, { clipPath: path });
-    log(`Clip saved (${(clip.blob.size / 1048576).toFixed(1)} MB, ${Math.round(clip.durationMs / 1000)} s)`);
-    if (state.view === 'events') renderEvents();
-  } catch (e) {
-    log(`Clip save failed: ${e.message}`, 'error');
-  }
+  await finishRecordingPart(session);
 }
 
-function rotateRecording() {
-  finalizeRecording().then(() => {
-    if (state.running && state.tracker?.tracks.length) ensureRecording();
-  });
+async function rotateRecording() {
+  const session = state.session;
+  if (!session) return;
+  await finishRecordingPart(session);
+  if (state.running && state.session === session && state.tracker?.tracks.length) ensureRecording();
 }
 
 // ---------------------------------------------------------------- drawing
@@ -730,13 +791,17 @@ function draw(detections, tracks, W, H) {
     }
 
     const cues = [];
-    if (Number.isFinite(d.obs.heightCm)) cues.push(`${d.obs.heightCm.toFixed(0)} cm${d.obs.heightExtrapolated ? '?' : ''}`);
-    else if (!state.calibration) cues.push('no calibration');
-    else if (!d.metrics.feetVisible) cues.push('feet hidden');
-    else if (!d.metrics.standing) cues.push('not standing');
-    if (Number.isFinite(d.obs.hair)) cues.push(`hair ${hairLabel(d.obs.hair)}`);
-    if (Number.isFinite(d.obs.build)) cues.push(`build ${d.obs.build.toFixed(2)}`);
-    if (d.face) cues.push('face ✓');
+    if (presenceMode()) {
+      if (tr) cues.push(`in view ${fmtDuration(tr.lastSeen - tr.firstSeen)}`);
+    } else {
+      if (Number.isFinite(d.obs.heightCm)) cues.push(`${d.obs.heightCm.toFixed(0)} cm${d.obs.heightExtrapolated ? '?' : ''}`);
+      else if (!state.calibration) cues.push('no calibration');
+      else if (!d.metrics.feetVisible) cues.push('feet hidden');
+      else if (!d.metrics.standing) cues.push('not standing');
+      if (Number.isFinite(d.obs.hair)) cues.push(`hair ${hairLabel(d.obs.hair)}`);
+      if (Number.isFinite(d.obs.build)) cues.push(`build ${d.obs.build.toFixed(2)}`);
+      if (d.face) cues.push('face ✓');
+    }
     drawLabel(ctx, bx, b.y, [labelFor(identity), cues.join(' · ')], color, W);
   }
 }
@@ -797,11 +862,16 @@ function renderPresence(tracks) {
       const p = state.presence.get(tr.id);
       const sum = summarizeTrack(tr);
       const cues = [];
-      if (Number.isFinite(sum.heightCm)) cues.push(`≈ ${sum.heightCm.toFixed(0)} cm`);
-      if (Number.isFinite(sum.hair)) cues.push(`hair: ${hairLabel(sum.hair)}`);
-      if (Number.isFinite(sum.build)) cues.push(`build ${sum.build.toFixed(2)}`);
-      cues.push(sum.faceDescriptors.length ? 'face seen' : 'no face yet');
-      cues.push(`${Math.round((tr.lastSeen - tr.firstSeen) / 1000)} s`);
+      const simple = presenceMode();
+      if (simple) {
+        cues.push(`entered ${fmtTime(Date.now() - (performance.now() - tr.firstSeen))}`);
+      } else {
+        if (Number.isFinite(sum.heightCm)) cues.push(`≈ ${sum.heightCm.toFixed(0)} cm`);
+        if (Number.isFinite(sum.hair)) cues.push(`hair: ${hairLabel(sum.hair)}`);
+        if (Number.isFinite(sum.build)) cues.push(`build ${sum.build.toFixed(2)}`);
+        cues.push(sum.faceDescriptors.length ? 'face seen' : 'no face yet');
+      }
+      cues.push(fmtDuration(tr.lastSeen - tr.firstSeen));
       const runnerUp = (id.ranked || [])
         .slice(0, 3)
         .map((r) => `${esc(r.name)} ${pct(r.score)}${r.parts?.face ? ` (face ${r.parts.face.d.toFixed(2)})` : ''}`)
@@ -1254,29 +1324,40 @@ async function renderEvents() {
     return;
   }
   const options = state.profiles.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  const simple = presenceMode();
+  const today = new Date().toDateString();
+  const todayCount = events.filter((e) => new Date(e.startedAt).toDateString() === today).length;
+  if (els.eventsCount) els.eventsCount.textContent = `· ${todayCount} today`;
   els.eventsList.innerHTML = events
     .map((e) => {
       const f = e.features || {};
+      const parts = e.clipPaths?.length ? e.clipPaths : e.clipPath ? [e.clipPath] : [];
       const cues = [];
       if (Number.isFinite(f.heightCm)) cues.push(`≈ ${f.heightCm.toFixed(0)} cm`);
       if (Number.isFinite(f.hair)) cues.push(`hair ${hairLabel(f.hair)}`);
       if (Number.isFinite(f.build)) cues.push(`build ${f.build.toFixed(2)}`);
       if (f.faceDescriptors?.length) cues.push(`${f.faceDescriptors.length} face sample${f.faceDescriptors.length > 1 ? 's' : ''}`);
-      const duration = e.endedAt ? `${Math.max(1, Math.round((new Date(e.endedAt) - new Date(e.startedAt)) / 1000))} s` : 'ongoing';
-      const title = e.confirmedPersonId ? `${esc(e.personName)} (confirmed)` : e.verdict === 'known' ? esc(e.personName) : e.verdict === 'ambiguous' ? `${esc(e.personName)}?` : e.verdict === 'unknown' ? 'Unknown person' : 'Unidentified';
+      const duration = e.endedAt ? fmtDuration(new Date(e.endedAt) - new Date(e.startedAt)) : 'ongoing';
+      const isVisit = e.verdict === 'person' || (simple && !e.personName);
+      const title = isVisit ? 'Visit' : e.confirmedPersonId ? `${esc(e.personName)} (confirmed)` : e.verdict === 'known' ? esc(e.personName) : e.verdict === 'ambiguous' ? `${esc(e.personName)}?` : e.verdict === 'unknown' ? 'Unknown person' : 'Unidentified';
+      const tag = isVisit ? '' : `<span class="tag ${esc(e.verdict)}">${esc(e.verdict)} ${e.confidence != null ? pct(e.confidence) : ''}</span>`;
+      const when = `${fmtDate(e.startedAt)} → ${e.endedAt ? fmtTime(e.endedAt) : 'now'} · ${duration}`;
+      const playButtons = parts.length
+        ? parts.map((path, i) => `<button type="button" data-act="play" data-path="${esc(path)}">${parts.length > 1 ? `Play part ${i + 1}` : 'Play clip'}</button>`).join('')
+        : '<button type="button" disabled>No clip</button>';
       return `<article class="event" data-id="${esc(e.id)}">
         <img class="thumb" alt="" data-snap="${esc(e.snapshotPath || '')}">
         <video controls hidden preload="none"></video>
         <div class="body">
-          <div class="title"><span>${title}</span><span class="tag ${esc(e.verdict)}">${esc(e.verdict)} ${e.confidence != null ? pct(e.confidence) : ''}</span></div>
-          <div class="meta">${fmtDate(e.startedAt)} · ${duration} ${e.alarmTriggered ? '· <span class="tag alarm">alarm</span>' : ''} ${e.lockTriggered ? '· <span class="tag">door locked</span>' : ''}</div>
-          <div class="meta">${cues.length ? cues.map(esc).join(' · ') : 'no body measurements'}</div>
+          <div class="title"><span>${title}</span>${tag}</div>
+          <div class="meta">${when} ${e.alarmTriggered ? '· <span class="tag alarm">alarm</span>' : ''} ${e.lockTriggered ? '· <span class="tag">door locked</span>' : ''}</div>
+          ${isVisit ? '' : `<div class="meta">${cues.length ? cues.map(esc).join(' · ') : 'no body measurements'}</div>`}
           ${f.ai?.summary ? `<div class="ai-note">${esc(f.ai.summary)}${f.ai.match ? `<span class="muted">Claude: fits ${esc(f.ai.match.name)} ${pct(f.ai.match.confidence)}</span>` : ''}</div>` : ''}
           <div class="actions">
-            <button type="button" data-act="play" ${e.clipPath ? '' : 'disabled'}>${e.clipPath ? 'Play clip' : 'No clip'}</button>
-            <button type="button" data-act="download" ${e.clipPath ? '' : 'disabled'} title="Save the clip to your computer">Download</button>
-            <select data-role="who"><option value="">Who was it?</option>${options}<option value="__stranger">A stranger</option></select>
-            <button type="button" data-act="confirm">Confirm</button>
+            ${playButtons}
+            ${parts.map((path, i) => `<button type="button" data-act="download" data-path="${esc(path)}" title="Save the clip to your computer">Download${parts.length > 1 ? ` ${i + 1}` : ''}</button>`).join('')}
+            ${simple ? '' : `<select data-role="who"><option value="">Who was it?</option>${options}<option value="__stranger">A stranger</option></select>
+            <button type="button" data-act="confirm">Confirm</button>`}
             <button type="button" data-act="delete" class="danger-outline">Delete</button>
           </div>
         </div>
@@ -1305,19 +1386,20 @@ async function onEventAction(ev) {
   if (!event) return;
   const act = btn.dataset.act;
   try {
+    const path = btn.dataset.path || event.clipPath;
     if (act === 'play') {
-      const url = await store.mediaUrl(event.clipPath);
+      const url = await store.mediaUrl(path);
       if (!url) return toast('Clip is not available (it may still be uploading)', 'error');
       const v = card.querySelector('video');
       v.src = url;
       v.hidden = false;
       v.play().catch(() => {});
     } else if (act === 'download') {
-      const url = await store.mediaUrl(event.clipPath);
+      const url = await store.mediaUrl(path);
       if (!url) return toast('Clip is not available (it may still be saving)', 'error');
       const a = document.createElement('a');
       a.href = url;
-      a.download = event.clipPath.split('/').pop();
+      a.download = path.split('/').pop();
       a.click();
     } else if (act === 'delete') {
       if (!confirm('Delete this event and its clip?')) return;
@@ -1506,7 +1588,7 @@ function renderDiagnostics() {
     lines.push(`face runtime: ${d.tfBackend}${d.float32 === false ? ' with 16-bit floats (recognition degraded: set runtime to WASM)' : ''} · detector: ${d.faceDetector} · pose: ${d.poseDelegate}`);
     lines.push(`device: ${d.appleMobile ? 'iPhone / iPad' : 'desktop or other'} · ${d.userAgent}`);
   }
-  lines.push(`timing: pose ${t.pose.toFixed(0)} ms · hair ${t.hair.toFixed(0)} ms · face ${t.face.toFixed(0)} ms · ${state.fps.value.toFixed(1)} fps`);
+  lines.push(`mode: ${presenceMode() ? 'record every visit' : 'identify people'} · timing: pose ${t.pose.toFixed(0)} ms · hair ${t.hair.toFixed(0)} ms · face ${t.face.toFixed(0)} ms · ${state.fps.value.toFixed(1)} fps`);
   lines.push(`storage: ${store.remote ? 'supabase' : 'browser'} · calibration: ${state.calibration ? 'yes' : 'no'} · people: ${state.profiles.length} (${state.profiles.filter((p) => p.faceDescriptors?.length).length} with face samples)`);
   lines.push(`claude: ${state.settings.aiEnabled ? (ai.ready ? `on (${state.settings.aiModel}), ${ai.callsInLastHour()} calls this hour` : 'enabled but no API key') : 'off'}`);
   els.diagnostics.textContent = lines.join('\n');
@@ -1533,6 +1615,13 @@ async function applySettings(next, { reconnect = true } = {}) {
   state.settings = next;
   saveSettings(next);
   ai.configure({ apiKey: next.aiApiKey });
+  if (prev.mode !== next.mode) {
+    if (state.running) await stopCamera();
+    state.engine?.close();
+    state.engine = null;
+    applyMode();
+    toast(presenceMode() ? 'Mode: record every visit. Start the camera again.' : 'Mode: identify people. Start the camera again to load the face models.');
+  }
   els.videoWrap.classList.toggle('mirror', !!next.mirror);
   state.tracker?.setOptions({ threshold: next.matchThreshold, margin: next.matchMargin });
   if (state.recorder) state.recorder.maxSec = next.clipMaxSec;
@@ -1677,7 +1766,8 @@ function bind() {
     localSet('hr.armed', state.armed);
     updateArmedUI();
     log(state.armed ? 'Alarm armed' : 'Alarm disarmed', 'warn');
-    if (state.armed && !state.profiles.length) toast('Nobody is enrolled yet, so every visitor counts as unknown once they are clearly seen.', 'error');
+    if (state.armed && !presenceMode() && !state.profiles.length) toast('Nobody is enrolled yet, so every visitor counts as unknown once they are clearly seen.', 'error');
+    if (state.armed && presenceMode()) toast(`Armed: the siren sounds when someone is in the room for ${state.settings.unknownGraceSec} s.`);
   });
   els.btnTestSiren.addEventListener('click', () => {
     if (siren.active) siren.stop();
@@ -1785,6 +1875,7 @@ async function init() {
   bind();
   renderSettings();
   updateArmedUI();
+  applyMode();
   ai.configure({ apiKey: state.settings.aiApiKey });
   await store.configure(state.settings);
   await loadProfiles();

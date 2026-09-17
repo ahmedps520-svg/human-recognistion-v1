@@ -78,6 +78,9 @@ export const HAIR_LENGTH_LABELS = {
 
 // Default user settings, persisted in localStorage (see settings.js).
 export const DEFAULT_SETTINGS = {
+  // 'presence': detect people, record each visit from entering to leaving, alarm when armed.
+  // 'identify': additionally recognise who it is (enrollment, calibration, face models).
+  mode: 'presence',
   supabaseUrl: '',
   supabaseAnonKey: '',
   supabaseEmail: '',
@@ -90,7 +93,7 @@ export const DEFAULT_SETTINGS = {
   unknownGraceSec: 4, // seconds of confident "unknown" before the alarm fires
   // recording
   recordClips: true,
-  clipMaxSec: 60,
+  clipMaxSec: 300, // a visit longer than this is saved in several parts
   clipTailSec: 3,
   recordAudio: false,
   // alarm & lock

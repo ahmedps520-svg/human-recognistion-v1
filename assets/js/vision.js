@@ -71,8 +71,10 @@ export class VisionEngine {
     this.faceOptions = null;
   }
 
-  async load({ delegate = 'GPU', numPoses = 3, blockTelemetry = true, faceDetector = 'ssd', tfBackend = 'auto' } = {}) {
+  async load({ delegate = 'GPU', numPoses = 3, blockTelemetry = true, faceDetector = 'ssd', tfBackend = 'auto', withFaces = true, withHair = true } = {}) {
     this.delegate = delegate;
+    this.withFaces = withFaces;
+    this.withHair = withHair;
     if (blockTelemetry) blockMediaPipeTelemetry();
     this.onStatus('Loading vision runtime…');
     const vision = await FilesetResolver.forVisionTasks(this.assets.mediapipeWasm);
@@ -89,8 +91,14 @@ export class VisionEngine {
         }),
       delegate,
     );
-    this.onStatus('Loading hair segmentation model…');
-    this.segmenter = await this._create(
+    if (!withHair && !withFaces) {
+      this.loaded = true;
+      this.onStatus(`Models ready (pose ${this.delegate})`);
+      return;
+    }
+    if (withHair) {
+      this.onStatus('Loading hair segmentation model…');
+      this.segmenter = await this._create(
       (d) =>
         ImageSegmenter.createFromOptions(vision, {
           baseOptions: { modelAssetPath: this.assets.segmenterModel, delegate: d },
@@ -98,8 +106,14 @@ export class VisionEngine {
           outputCategoryMask: true,
           outputConfidenceMasks: false,
         }),
-      delegate,
-    );
+        delegate,
+      );
+    }
+    if (!withFaces) {
+      this.loaded = true;
+      this.onStatus(`Models ready (pose ${this.delegate})`);
+      return;
+    }
     this.onStatus('Preparing face runtime…');
     await this._selectTfBackend(tfBackend);
     this.onStatus('Loading face models…');

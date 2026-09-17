@@ -1,22 +1,36 @@
 # Room Guard (human-recognition v1)
 
-A bedroom camera that runs entirely in the browser, recognises the people who
-belong in the room, saves clips of every visit, and raises an alarm (and can
-ask a smart lock to lock the door) when it sees someone it does not know.
+A bedroom camera that runs entirely in the browser. Whenever a person is in
+the room it records the visit from the moment they are seen until they
+leave, keeps a snapshot and the clip, and can sound an alarm when armed.
+Optionally it can also work out who the person is.
 
 Version 1 is a static site meant for **GitHub Pages**. For now everything it
-learns and records (people, events, clips) stays in the browser that runs the
-camera; cloud sync with **Supabase** is built in but optional and off by
-default. No server of your own is needed: the machine learning runs on-device
-inside the browser tab that has the camera.
+records (visits, clips, settings) stays in the browser that runs the camera;
+cloud sync with **Supabase** is built in but optional and off by default. No
+server of your own is needed: the machine learning runs on-device inside the
+browser tab that has the camera.
 
-> **Status:** v1 foundation. Detection, identification, recording, alarms and
-> the learning loop all work end to end, but height estimation is
-> *approximate*, weight is only estimated as "build", and nothing here is a
-> substitute for a real security system. See [Limitations](#limitations) and
-> [docs/ROADMAP.md](docs/ROADMAP.md) for the year-long plan.
+> **Status:** v1. Visit recording, alarms and the optional identification
+> mode all work end to end, but height estimation is *approximate* and
+> nothing here is a substitute for a real security system. See
+> [Limitations](#limitations) and [docs/ROADMAP.md](docs/ROADMAP.md).
 
-## How it identifies people
+## Two modes
+
+**Record every visit (default).** A pose model finds people in each frame.
+The first time someone is seen a recording starts; it stops a few seconds
+after the room is empty again. Each visit becomes an event with the time
+they entered, the time they left, the duration, a snapshot and the clip
+(long visits are saved in several parts). When the alarm is armed, any
+person present for longer than the grace period triggers the siren, a
+notification and, if configured, the door-lock webhook. Only the pose model
+is loaded, so the camera starts fast and uses little power.
+
+**Identify people (Settings → Mode).** Adds the People and Calibrate tabs and
+the face and hair models, and tries to name the person as described below.
+
+## How identification works (identify mode)
 
 Every frame goes through three on-device models:
 
@@ -45,7 +59,8 @@ your camera, your room and your family over time.
 
 ## Features in v1
 
-- Live view with skeleton overlay, name, confidence and measured cues.
+- Live view with skeleton overlay and, in identify mode, name, confidence and measured cues.
+- Visit log: entered, left, duration, snapshot, clip (multi-part for long visits), download.
 - Enrollment of family members: name, height, weight, hair length, colour,
   "notify me when they enter", face and body capture with a live preview and
   sample thumbnails, plus face import from album photos.
@@ -90,7 +105,7 @@ uploaded anywhere. Three things follow from that:
   file (import it on a new machine). Clips are downloaded one at a time from
   the Events tab.
 
-### 3. Enroll your family
+### 3. (Identify mode only) Enroll your family
 
 On the **People** tab add each person with their height, weight and hair
 length. The form shows a live camera preview with the same overlay as the
@@ -109,7 +124,7 @@ you can see what the camera is getting before you capture:
 More samples in different lighting, angles and days make the match more
 robust.
 
-### 4. Calibrate height
+### 4. (Identify mode only) Calibrate height
 
 On the **Calibrate** tab pick a person whose height you know, press **Start
 collecting**, and have them walk slowly around the whole room facing the
@@ -118,8 +133,10 @@ for under 4 cm) and save. Redo this whenever the camera moves.
 
 ### 5. Arm it
 
-Press **Arm alarm** on the Live tab. The badge shows "Armed". Strangers who are
-clearly seen for longer than the grace period (default 4 s) trigger the alarm.
+Press **Arm alarm** on the Live tab. The badge shows "Armed". In the default
+mode any person present for longer than the grace period (default 4 s)
+triggers the alarm; in identify mode only people the camera does not
+recognise do.
 
 ### Door lock
 

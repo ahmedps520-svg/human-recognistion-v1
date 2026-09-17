@@ -54,6 +54,7 @@ const eventFromRow = (r) => ({
   confidence: r.confidence == null ? null : Number(r.confidence),
   features: r.features || {},
   clipPath: r.clip_path,
+  clipPaths: Array.isArray(r.clip_paths) && r.clip_paths.length ? r.clip_paths : r.clip_path ? [r.clip_path] : [],
   snapshotPath: r.snapshot_path,
   alarmTriggered: !!r.alarm_triggered,
   lockTriggered: !!r.lock_triggered,
@@ -71,6 +72,7 @@ const eventToRow = (e) => ({
   confidence: e.confidence ?? null,
   features: e.features || {},
   clip_path: e.clipPath ?? null,
+  clip_paths: e.clipPaths || (e.clipPath ? [e.clipPath] : []),
   snapshot_path: e.snapshotPath ?? null,
   alarm_triggered: !!e.alarmTriggered,
   lock_triggered: !!e.lockTriggered,
@@ -83,7 +85,7 @@ const patchToRow = (patch) => {
   const out = {};
   const keys = {
     endedAt: 'ended_at', verdict: 'verdict', personId: 'person_id', personName: 'person_name', confidence: 'confidence',
-    features: 'features', clipPath: 'clip_path', snapshotPath: 'snapshot_path', alarmTriggered: 'alarm_triggered',
+    features: 'features', clipPath: 'clip_path', clipPaths: 'clip_paths', snapshotPath: 'snapshot_path', alarmTriggered: 'alarm_triggered',
     lockTriggered: 'lock_triggered', confirmedPersonId: 'confirmed_person_id', cameraLabel: 'camera_label',
   };
   for (const [k, col] of Object.entries(keys)) if (k in patch) out[col] = row[col];
@@ -279,8 +281,7 @@ export class Store {
     all.unshift(e);
     if (all.length > LOCAL_EVENT_CAP) {
       for (const old of all.splice(LOCAL_EVENT_CAP)) {
-        if (old.clipPath) idbDelete(old.clipPath).catch(() => {});
-        if (old.snapshotPath) idbDelete(old.snapshotPath).catch(() => {});
+        for (const path of new Set([old.clipPath, ...(old.clipPaths || []), old.snapshotPath])) if (path) idbDelete(path).catch(() => {});
       }
     }
     localSet(LOCAL_KEYS.events, all);
@@ -305,12 +306,12 @@ export class Store {
     if (this.remote && this.user) {
       const { error } = await this.client.from('events').delete().eq('id', event.id);
       if (error) this._throw(error, 'Deleting event failed');
-      const paths = [event.clipPath, event.snapshotPath].filter(Boolean);
+      const paths = [...new Set([event.clipPath, ...(event.clipPaths || []), event.snapshotPath].filter(Boolean))];
       if (paths.length) await this.client.storage.from(BUCKET).remove(paths);
       return;
     }
     localSet(LOCAL_KEYS.events, localGet(LOCAL_KEYS.events, []).filter((x) => x.id !== event.id));
-    for (const p of [event.clipPath, event.snapshotPath]) if (p) idbDelete(p).catch(() => {});
+    for (const p of new Set([event.clipPath, ...(event.clipPaths || []), event.snapshotPath])) if (p) idbDelete(p).catch(() => {});
   }
 
   // ---------- media ----------
