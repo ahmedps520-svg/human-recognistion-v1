@@ -10,7 +10,7 @@ always on and physical.
 - [x] On-device pose, hair segmentation and face descriptors.
 - [x] Height via floor calibration, build proxy, hair length index.
 - [x] Weighted scoring with known / ambiguous / unknown / insufficient verdicts and temporal smoothing.
-- [x] Clip + snapshot recording to Supabase Storage (IndexedDB fallback).
+- [x] Clip + snapshot recording in the browser (IndexedDB) with persistent-storage request and clip downloads; Supabase upload built in, off by default.
 - [x] Events log with confirmation feedback that updates the person's samples.
 - [x] Siren, notifications, door-lock webhook, arm/disarm.
 - [ ] Field test with the whole family for two weeks; tune weights and sigmas from confirmed events.
@@ -29,6 +29,8 @@ always on and physical.
 ## Phase 3 — Always on (months 5–7)
 - Dedicated device (Raspberry Pi 5 / Jetson / mini PC) running a kiosk browser
   or a Node/Python port of the pipeline, with a watchdog and auto-restart.
+- Turn on Supabase sync (schema, client and sign-in already in the app) so
+  events and clips leave the laptop.
 - Supabase Edge Function to receive events and fan out push notifications
   (Telegram / WhatsApp / email) and to call the lock.
 - Realtime dashboard (Supabase Realtime) so a phone can watch events and

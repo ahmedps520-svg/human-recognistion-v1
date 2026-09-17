@@ -73,6 +73,7 @@ function showView(name) {
   if (name === 'events') renderEvents();
   if (name === 'people') renderPeople();
   if (name === 'calibrate') renderCalibration();
+  if (name === 'settings') refreshStorageInfo();
 }
 
 function profileById(id) {
@@ -118,7 +119,7 @@ function colorFor(identity) {
 function updateStoreStatus() {
   const el = els.storeStatus;
   if (!store.remote) {
-    el.textContent = 'Local mode';
+    el.textContent = 'Browser storage';
     el.className = 'status-pill';
   } else if (store.user) {
     el.textContent = `Supabase · ${store.user.email || 'signed in'}`;
@@ -234,6 +235,7 @@ async function startCamera() {
     state.running = true;
     els.btnStop.disabled = false;
     els.btnSnapshot.disabled = false;
+    if (!store.remote) requestPersistentStorage({ quiet: true });
     log('Camera started');
     requestAnimationFrame(loop);
   } catch (e) {
@@ -873,6 +875,7 @@ async function renderEvents() {
           <div class="meta">${cues.length ? cues.map(esc).join(' · ') : 'no body measurements'}</div>
           <div class="actions">
             <button type="button" data-act="play" ${e.clipPath ? '' : 'disabled'}>${e.clipPath ? 'Play clip' : 'No clip'}</button>
+            <button type="button" data-act="download" ${e.clipPath ? '' : 'disabled'} title="Save the clip to your computer">Download</button>
             <select data-role="who"><option value="">Who was it?</option>${options}<option value="__stranger">A stranger</option></select>
             <button type="button" data-act="confirm">Confirm</button>
             <button type="button" data-act="delete" class="danger-outline">Delete</button>
@@ -910,6 +913,13 @@ async function onEventAction(ev) {
       v.src = url;
       v.hidden = false;
       v.play().catch(() => {});
+    } else if (act === 'download') {
+      const url = await store.mediaUrl(event.clipPath);
+      if (!url) return toast('Clip is not available (it may still be saving)', 'error');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = event.clipPath.split('/').pop();
+      a.click();
     } else if (act === 'delete') {
       if (!confirm('Delete this event and its clip?')) return;
       await store.deleteEvent(event);
@@ -1125,6 +1135,41 @@ async function signOut() {
   toast('Signed out');
 }
 
+async function refreshStorageInfo() {
+  if (!els.storageUsage) return;
+  try {
+    const est = navigator.storage?.estimate ? await navigator.storage.estimate() : null;
+    const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
+    if (!est) {
+      els.storageUsage.textContent = 'Storage usage: not reported by this browser';
+      return;
+    }
+    const mb = (n) => `${(n / 1048576).toFixed(1)} MB`;
+    els.storageUsage.textContent = `Storage usage: ${mb(est.usage || 0)} used of about ${mb(est.quota || 0)} available · ${
+      persisted ? 'the browser has agreed to keep this data' : 'the browser may clear this data when disk space runs low'
+    }`;
+    els.btnPersist.disabled = persisted;
+  } catch {
+    els.storageUsage.textContent = 'Storage usage: unavailable';
+  }
+}
+
+async function requestPersistentStorage({ quiet = false } = {}) {
+  if (!navigator.storage?.persist) {
+    if (!quiet) toast('This browser does not support persistent storage', 'error');
+    return false;
+  }
+  let ok = false;
+  try {
+    ok = await navigator.storage.persist();
+  } catch {
+    ok = false;
+  }
+  if (!quiet) toast(ok ? 'The browser will keep your data' : 'The browser declined for now; it may clear data when space runs low', ok ? '' : 'error');
+  refreshStorageInfo();
+  return ok;
+}
+
 function exportData() {
   const data = exportLocalData();
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -1241,6 +1286,7 @@ function bind() {
     const r = await triggerDoorLock({ url: s.lockWebhookUrl, token: s.lockWebhookToken, action: 'test', reason: 'manual test' });
     toast(r.message, r.ok ? '' : 'error');
   });
+  els.btnPersist.addEventListener('click', () => requestPersistentStorage());
   els.btnExport.addEventListener('click', exportData);
   els.importFile.addEventListener('change', (e) => {
     if (e.target.files[0]) importData(e.target.files[0]);

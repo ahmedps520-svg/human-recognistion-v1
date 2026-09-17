@@ -4,10 +4,11 @@ A bedroom camera that runs entirely in the browser, recognises the people who
 belong in the room, saves clips of every visit, and raises an alarm (and can
 ask a smart lock to lock the door) when it sees someone it does not know.
 
-Version 1 is a static site meant for **GitHub Pages**, with **Supabase** as
-the cloud store for clips, events and enrolled people. No server of your own
-is needed: the machine learning runs on-device inside the browser tab that
-has the camera.
+Version 1 is a static site meant for **GitHub Pages**. For now everything it
+learns and records (people, events, clips) stays in the browser that runs the
+camera; cloud sync with **Supabase** is built in but optional and off by
+default. No server of your own is needed: the machine learning runs on-device
+inside the browser tab that has the camera.
 
 > **Status:** v1 foundation. Detection, identification, recording, alarms and
 > the learning loop all work end to end, but height estimation is
@@ -48,11 +49,11 @@ your camera, your room and your family over time.
 - Enrollment of family members: name, height, weight, hair length, colour,
   "notify me when they enter", plus face and body sample capture from the camera.
 - Floor calibration wizard for height estimation (per camera placement).
-- Clip recording (WebM) of every occupancy, snapshots per visit, uploaded to
-  Supabase Storage or kept in the browser's IndexedDB when Supabase is not configured.
+- Clip recording (WebM) of every occupancy and a snapshot per visit, kept in
+  the browser's IndexedDB (or uploaded to Supabase Storage once cloud sync is turned on).
 - Event log with thumbnails, playback, "who was it?" confirmation (learning) and deletion.
 - Siren (Web Audio), browser notifications and a generic door-lock webhook.
-- Arm / disarm, configurable thresholds, export / import of local data.
+- Arm / disarm, configurable thresholds, backup export / import, clip downloads.
 - Works offline after the first load (models are cached by the browser).
 
 ## Setup
@@ -70,19 +71,20 @@ The site is plain HTML/JS with no build step.
 
 You can also run it locally with `npm run serve` and open `http://localhost:8080`.
 
-### 2. Create the Supabase project (optional but recommended)
+### 2. Where your data lives (for now: in the browser)
 
-1. Create a project at [supabase.com](https://supabase.com).
-2. Open the SQL editor, paste `supabase/schema.sql`, run it. It creates the
-   `profiles`, `events` and `cameras` tables, the private `clips` storage
-   bucket, and row-level-security policies that allow **authenticated users only**.
-3. Under **Authentication → Users** add yourself (email + password) and under
-   **Authentication → Providers → Email** disable public sign-ups.
-4. In the app's **Settings** tab enter the project URL, the anon key, your
-   email and password, then **Save & sign in**.
+Everything is stored in the browser you run the camera in: people, events
+and settings in localStorage, clips and snapshots in IndexedDB. Nothing is
+uploaded anywhere. Three things follow from that:
 
-Without Supabase everything is stored in the browser you use; use
-**Export local data** for backups.
+- Use the same browser profile on the same computer every time; another
+  browser starts empty.
+- When you first start the camera the app asks the browser for *persistent
+  storage* so clips are not evicted when disk space runs low. Settings →
+  Browser storage shows usage and lets you ask again.
+- **Export backup** in Settings saves people, events and settings as a JSON
+  file (import it on a new machine). Clips are downloaded one at a time from
+  the Events tab.
 
 ### 3. Enroll your family
 
@@ -112,6 +114,22 @@ with a bearer token) to the URL you configure. Point it at a Home Assistant
 webhook automation, a Supabase Edge Function, or a small ESP32/Raspberry Pi
 server driving a servo or a smart lock. The endpoint must allow CORS from your
 Pages origin. Use **Send test lock request** in Settings to verify it.
+
+## Later: cloud storage with Supabase
+
+The Supabase client, schema and sign-in flow are already in the app; they are
+just not needed yet. When you want clips and events off the laptop:
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. Open the SQL editor, paste `supabase/schema.sql`, run it. It creates the
+   `profiles`, `events` and `cameras` tables, the private `clips` storage
+   bucket, and row-level-security policies that allow **authenticated users only**.
+3. Under **Authentication → Users** add yourself (email + password) and under
+   **Authentication → Providers → Email** disable public sign-ups.
+4. In the app's **Settings → Cloud sync** enter the project URL, the anon key,
+   your email and password, then **Save & sign in**. From then on people,
+   events and clips are read from and written to Supabase; the browser copy
+   is kept as an offline cache of people and calibration.
 
 ## Development
 

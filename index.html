@@ -152,22 +152,6 @@
         </fieldset>
 
         <fieldset>
-          <legend>Supabase (cloud storage for clips, events and people)</legend>
-          <p class="muted small">Leave empty to keep everything in this browser only. See <code>supabase/schema.sql</code> for the tables to create.</p>
-          <label>Project URL <input name="supabaseUrl" type="url" placeholder="https://xxxx.supabase.co"></label>
-          <label>Anon (public) key <input name="supabaseAnonKey" type="password" placeholder="eyJ…"></label>
-          <div class="row">
-            <label>Email <input name="supabaseEmail" type="email" placeholder="you@example.com"></label>
-            <label>Password <input id="supabasePassword" type="password" placeholder="••••••••"></label>
-          </div>
-          <div class="actions">
-            <button type="button" id="btnSignIn">Save &amp; sign in</button>
-            <button type="button" id="btnSignOut">Sign out</button>
-            <span id="connStatus" class="muted small"></span>
-          </div>
-        </fieldset>
-
-        <fieldset>
           <legend>Identification</legend>
           <div class="row">
             <label>Match threshold <input name="matchThreshold" type="number" min="0.3" max="0.95" step="0.01"></label>
@@ -209,13 +193,33 @@
         </fieldset>
 
         <fieldset>
-          <legend>Data</legend>
+          <legend>Browser storage</legend>
+          <p class="muted small">People, events and settings live in this browser's local storage; clips and snapshots in its IndexedDB. Nothing leaves your computer. Clearing site data or switching browsers starts from scratch, so export a backup now and then. Clips are downloaded one by one from the Events tab.</p>
+          <div id="storageUsage" class="muted small">Storage usage: …</div>
           <div class="actions">
-            <button type="button" id="btnExport">Export local data</button>
-            <label class="file-btn">Import local data <input type="file" id="importFile" accept="application/json" hidden></label>
+            <button type="button" id="btnPersist">Ask the browser to keep this data</button>
+            <button type="button" id="btnExport">Export backup (people, events, settings)</button>
+            <label class="file-btn">Import backup <input type="file" id="importFile" accept="application/json" hidden></label>
             <button type="button" id="btnWipe" class="danger-outline">Wipe everything stored in this browser</button>
           </div>
         </fieldset>
+
+        <fieldset>
+          <legend>Cloud sync with Supabase (optional, not needed yet)</legend>
+          <p class="muted small">For now everything stays in this browser. Fill this in later if you want people, events and clips in the cloud; <code>supabase/schema.sql</code> creates the tables. Leave empty to keep using browser storage.</p>
+          <label>Project URL <input name="supabaseUrl" type="url" placeholder="https://xxxx.supabase.co"></label>
+          <label>Anon (public) key <input name="supabaseAnonKey" type="password" placeholder="eyJ…"></label>
+          <div class="row">
+            <label>Email <input name="supabaseEmail" type="email" placeholder="you@example.com"></label>
+            <label>Password <input id="supabasePassword" type="password" placeholder="••••••••"></label>
+          </div>
+          <div class="actions">
+            <button type="button" id="btnSignIn">Save &amp; sign in</button>
+            <button type="button" id="btnSignOut">Sign out</button>
+            <span id="connStatus" class="muted small"></span>
+          </div>
+        </fieldset>
+
 
         <div class="actions sticky">
           <button type="submit" class="primary">Save settings</button>
