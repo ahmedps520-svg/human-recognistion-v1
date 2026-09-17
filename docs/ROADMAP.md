@@ -13,6 +13,7 @@ always on and physical.
 - [x] Clip + snapshot recording in the browser (IndexedDB) with persistent-storage request and clip downloads; Supabase upload built in, off by default.
 - [x] Events log with confirmation feedback that updates the person's samples.
 - [x] Siren, notifications, door-lock webhook, arm/disarm.
+- [x] Enrollment preview with readiness indicators, face thumbnails, album photo import.
 - [ ] Field test with the whole family for two weeks; tune weights and sigmas from confirmed events.
 
 ## Phase 2 — Accuracy (months 3–4)

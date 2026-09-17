@@ -17,6 +17,7 @@ create table if not exists public.profiles (
   weight_kg numeric,
   hair_length text not null default 'short' check (hair_length in ('bald', 'short', 'medium', 'long')),
   face_descriptors jsonb not null default '[]'::jsonb, -- array of 128-float arrays
+  face_thumbs jsonb not null default '[]'::jsonb,      -- small JPEG data URLs, one per descriptor (null when unknown)
   samples jsonb not null default '[]'::jsonb,          -- [{t, height, build, hair, source}]
   color text default '#4ade80',
   alert_on_enter boolean not null default false,
@@ -24,6 +25,9 @@ create table if not exists public.profiles (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Existing databases created before face thumbnails existed:
+alter table public.profiles add column if not exists face_thumbs jsonb not null default '[]'::jsonb;
 
 -- ---------------------------------------------------------------- visits
 create table if not exists public.events (

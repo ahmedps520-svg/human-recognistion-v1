@@ -47,7 +47,8 @@ your camera, your room and your family over time.
 
 - Live view with skeleton overlay, name, confidence and measured cues.
 - Enrollment of family members: name, height, weight, hair length, colour,
-  "notify me when they enter", plus face and body sample capture from the camera.
+  "notify me when they enter", face and body capture with a live preview and
+  sample thumbnails, plus face import from album photos.
 - Floor calibration wizard for height estimation (per camera placement).
 - Clip recording (WebM) of every occupancy and a snapshot per visit, kept in
   the browser's IndexedDB (or uploaded to Supabase Storage once cloud sync is turned on).
@@ -89,10 +90,21 @@ uploaded anywhere. Three things follow from that:
 ### 3. Enroll your family
 
 On the **People** tab add each person with their height, weight and hair
-length. Start the camera on the Live tab, have the person stand in front of
-it, and press **Capture 5 face samples** (ask them to look at the camera and
-turn a little between shots) and **Capture body sample**. Repeat face capture
-on other days and lighting for robustness; more samples are better.
+length. The form shows a live camera preview with the same overlay as the
+Live tab and a readiness line (face, hair, feet, standing, facing camera) so
+you can see what the camera is getting before you capture:
+
+- **Capture 5 face samples** grabs faces from the camera; each one appears as
+  a thumbnail you can inspect and remove.
+- **Capture body sample** records hair length, build and (after calibration)
+  height while the person stands still with their whole body in view.
+- **Add photos from album** finds faces in photos you already have (phone
+  album or any image files). Tick the faces that belong to this person and
+  add them. Photos only contribute face samples; body measurements come from
+  the room camera so they match what it sees.
+
+More samples in different lighting, angles and days make the match more
+robust.
 
 ### 4. Calibrate height
 

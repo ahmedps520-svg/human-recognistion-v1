@@ -87,16 +87,28 @@
           </div>
           <label>Notes <textarea name="notes" rows="2" placeholder="Usually wears glasses, comes in around 7pm…"></textarea></label>
           <div class="capture">
-            <div class="counts">
-              <span>Face samples: <b id="faceCount">0</b></span>
-              <span>Body samples: <b id="bodyCount">0</b></span>
+            <div class="enroll-preview" id="enrollPreviewWrap">
+              <canvas id="enrollPreview"></canvas>
+              <div id="enrollPreviewOff" class="preview-off">
+                <p class="muted small">Camera is off.</p>
+                <button type="button" id="btnEnrollStartCamera" class="primary">Start camera</button>
+              </div>
             </div>
+            <div id="enrollStatus" class="muted small">Camera is off.</div>
             <div class="actions">
               <button type="button" id="btnCaptureFace">Capture 5 face samples</button>
               <button type="button" id="btnCaptureBody">Capture body sample</button>
-              <button type="button" id="btnClearSamples" class="danger-outline">Clear samples</button>
+              <label class="file-btn">Add photos from album <input type="file" id="photoInput" accept="image/*" multiple hidden></label>
             </div>
-            <p id="captureHint" class="muted small">Start the camera on the Live tab first, then have this person stand in front of it.</p>
+            <p id="captureHint" class="muted small">Have this person stand in front of the camera, or add clear photos of their face from your album. Body measurements (height, hair, build) only come from the room camera.</p>
+            <div id="photoReview" class="photo-review hidden"></div>
+            <div class="counts">
+              <span>Face samples: <b id="faceCount">0</b></span>
+              <span>Body samples: <b id="bodyCount">0</b></span>
+              <button type="button" id="btnClearSamples" class="danger-outline inline">Clear all</button>
+            </div>
+            <div id="faceThumbs" class="thumbs"></div>
+            <div id="bodySamples" class="samples"></div>
           </div>
           <div class="actions">
             <button type="submit" class="primary">Save person</button>

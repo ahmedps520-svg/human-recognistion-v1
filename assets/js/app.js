@@ -45,6 +45,9 @@ const state = {
   emptySince: null,
   alarmActive: false,
   editing: null,
+  engineLoading: null,
+  enrollPreviewRaf: 0,
+  photoCandidates: null,
   calib: { collecting: false, samples: [], refHeight: null, fit: null, reason: '' },
   view: 'live',
 };
@@ -220,10 +223,7 @@ async function startCamera() {
     }
     listCameras();
 
-    if (!state.engine) {
-      state.engine = new VisionEngine({ onStatus: (m) => (els.modelStatus.textContent = m) });
-      await state.engine.load({ delegate: s.poseModelDelegate || 'GPU', blockTelemetry: s.blockTelemetry !== false });
-    }
+    await ensureEngine();
     state.tracker = new Tracker({ threshold: s.matchThreshold, margin: s.matchMargin });
     state.recorder = new ClipRecorder(state.stream, { maxSec: s.clipMaxSec });
     state.recorder.onAutoStop = () => rotateRecording();
@@ -245,6 +245,22 @@ async function startCamera() {
     els.btnStart.disabled = false;
     stopStream();
   }
+}
+
+/** Load the vision models once; shared by the camera and the album photo import. */
+async function ensureEngine() {
+  if (state.engine?.loaded) return state.engine;
+  if (!state.engineLoading) {
+    if (!state.engine) state.engine = new VisionEngine({ onStatus: (m) => (els.modelStatus.textContent = m) });
+    const s = state.settings;
+    state.engineLoading = state.engine
+      .load({ delegate: s.poseModelDelegate || 'GPU', blockTelemetry: s.blockTelemetry !== false })
+      .finally(() => {
+        state.engineLoading = null;
+      });
+  }
+  await state.engineLoading;
+  return state.engine;
 }
 
 function stopStream() {
@@ -699,6 +715,7 @@ function renderPeople() {
           <span>${esc(HAIR_LENGTH_LABELS[p.hairLength] || p.hairLength || '')}</span>
           <span>${p.faceDescriptors?.length || 0} face · ${p.samples?.length || 0} body samples</span>
         </div>
+        ${(p.faceThumbs || []).some(Boolean) ? `<div class="thumbs">${(p.faceThumbs || []).filter(Boolean).slice(0, 5).map((t) => `<figure><img src="${t}" alt=""></figure>`).join('')}</div>` : ''}
         ${p.notes ? `<p class="small muted">${esc(p.notes)}</p>` : ''}
         ${warn.length ? `<div class="warn">⚠ ${warn.join(', ')}</div>` : ''}
         <div class="actions">
@@ -713,9 +730,12 @@ function renderPeople() {
 function openPersonForm(profile) {
   const f = els.personForm;
   state.editing = profile
-    ? { ...profile, faceDescriptors: [...(profile.faceDescriptors || [])], samples: [...(profile.samples || [])] }
-    : { id: '', name: '', heightCm: '', weightKg: '', hairLength: 'short', color: '#4ade80', alertOnEnter: false, notes: '', faceDescriptors: [], samples: [] };
+    ? { ...profile, faceDescriptors: [...(profile.faceDescriptors || [])], faceThumbs: [...(profile.faceThumbs || [])], samples: [...(profile.samples || [])] }
+    : { id: '', name: '', heightCm: '', weightKg: '', hairLength: 'short', color: '#4ade80', alertOnEnter: false, notes: '', faceDescriptors: [], faceThumbs: [], samples: [] };
   const e = state.editing;
+  while (e.faceThumbs.length < e.faceDescriptors.length) e.faceThumbs.push(null);
+  e.faceThumbs.length = e.faceDescriptors.length;
+  closePhotoReview();
   f.elements.personId.value = e.id || '';
   f.elements.name.value = e.name || '';
   f.elements.heightCm.value = e.heightCm ?? '';
@@ -727,15 +747,138 @@ function openPersonForm(profile) {
   els.personFormTitle.textContent = profile ? `Edit ${profile.name}` : 'Add a person';
   updateSampleCounts();
   f.classList.remove('hidden');
+  startEnrollPreview();
   f.elements.name.focus();
 }
 
+function closePersonForm() {
+  els.personForm.classList.add('hidden');
+  state.editing = null;
+  stopEnrollPreview();
+  closePhotoReview();
+}
+
+// ---------------------------------------------------------------- enrollment preview
+function startEnrollPreview() {
+  cancelAnimationFrame(state.enrollPreviewRaf);
+  const tick = () => {
+    if (!state.editing) return;
+    if (state.view === 'people') drawEnrollPreview();
+    state.enrollPreviewRaf = requestAnimationFrame(tick);
+  };
+  tick();
+}
+
+function stopEnrollPreview() {
+  cancelAnimationFrame(state.enrollPreviewRaf);
+  state.enrollPreviewRaf = 0;
+}
+
+function drawEnrollPreview() {
+  const c = els.enrollPreview;
+  const video = els.video;
+  const on = state.running && video.videoWidth > 0;
+  els.enrollPreviewOff.classList.toggle('hidden', on);
+  els.btnEnrollStartCamera.disabled = !!state.engineLoading || els.btnStart.disabled;
+  if (!on) {
+    updateEnrollStatus();
+    return;
+  }
+  const W = video.videoWidth;
+  const H = video.videoHeight;
+  if (c.width !== W || c.height !== H) {
+    c.width = W;
+    c.height = H;
+  }
+  const ctx = c.getContext('2d');
+  if (state.settings.mirror) {
+    ctx.save();
+    ctx.translate(W, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, W, H);
+    ctx.restore();
+  } else {
+    ctx.drawImage(video, 0, 0, W, H);
+  }
+  if (els.overlay.width === W && els.overlay.height === H) ctx.drawImage(els.overlay, 0, 0);
+  updateEnrollStatus();
+}
+
+function updateEnrollStatus() {
+  const el = els.enrollStatus;
+  if (!state.running) {
+    el.textContent = state.engineLoading ? els.modelStatus.textContent : 'Camera is off. Start it to capture from the camera, or add photos from your album.';
+    return;
+  }
+  const ds = state.lastDetections;
+  if (!ds.length) {
+    el.textContent = 'Nobody detected yet. Step into view with your whole body visible.';
+    return;
+  }
+  if (ds.length > 1) {
+    el.textContent = `${ds.length} people in view. Only the person being enrolled should be visible.`;
+    return;
+  }
+  const d = ds[0];
+  const m = d.metrics;
+  const ok = (b) => (b ? '✓' : '✗');
+  const parts = [
+    `face ${ok(d.face)}`,
+    `hair ${ok(Number.isFinite(d.obs.hair))}`,
+    `feet ${ok(m.feetVisible)}`,
+    `standing ${ok(m.standing)}`,
+    `facing camera ${ok(m.facing != null && m.facing >= 0.5)}`,
+  ];
+  if (Number.isFinite(d.obs.heightCm)) parts.push(`height ≈ ${d.obs.heightCm.toFixed(0)} cm`);
+  else parts.push(state.calibration ? 'height – (stand up straight, feet in view)' : 'height needs calibration');
+  el.textContent = parts.join(' · ');
+}
+
+/** Crop a face (with some margin) from a video or canvas into a small JPEG data URL. */
+function cropFace(source, box, size = 96) {
+  const srcW = source.videoWidth || source.width;
+  const srcH = source.videoHeight || source.height;
+  const pad = 0.3;
+  const side = Math.max(box.w, box.h) * (1 + 2 * pad);
+  const cx = box.x + box.w / 2;
+  const cy = box.y + box.h / 2 - box.h * 0.1;
+  const sx = Math.max(0, Math.min(srcW - side, cx - side / 2));
+  const sy = Math.max(0, Math.min(srcH - side, cy - side / 2));
+  const c = document.createElement('canvas');
+  c.width = size;
+  c.height = size;
+  c.getContext('2d').drawImage(source, sx, sy, side, side, 0, 0, size, size);
+  return c.toDataURL('image/jpeg', 0.7);
+}
+
+function renderSamples() {
+  const e = state.editing;
+  if (!e) return;
+  els.faceCount.textContent = e.faceDescriptors.length;
+  els.bodyCount.textContent = e.samples.length;
+  els.faceThumbs.innerHTML = e.faceDescriptors
+    .map((_, i) => {
+      const t = e.faceThumbs?.[i];
+      return `<figure title="Face sample ${i + 1}">${t ? `<img src="${t}" alt="">` : '🙂'}<button type="button" data-remove-face="${i}" title="Remove this sample">×</button></figure>`;
+    })
+    .join('');
+  els.bodySamples.innerHTML = e.samples
+    .map((smp, i) => {
+      const bits = [];
+      if (Number.isFinite(smp.height)) bits.push(`${smp.height.toFixed(0)} cm`);
+      if (Number.isFinite(smp.hair)) bits.push(`hair ${hairLabel(smp.hair)}`);
+      if (Number.isFinite(smp.build)) bits.push(`build ${smp.build.toFixed(2)}`);
+      const when = smp.t ? fmtDate(smp.t) : '';
+      return `<div>${esc(bits.join(' · ') || 'empty sample')} <span class="muted">(${esc(smp.source || 'camera')}${when ? `, ${esc(when)}` : ''})</span><button type="button" class="x" data-remove-body="${i}" title="Remove this sample">×</button></div>`;
+    })
+    .join('');
+}
+
 function updateSampleCounts() {
-  els.faceCount.textContent = state.editing?.faceDescriptors.length || 0;
-  els.bodyCount.textContent = state.editing?.samples.length || 0;
+  renderSamples();
   els.captureHint.textContent = state.running
-    ? 'Camera is on. Have this person stand in front of it, then capture.'
-    : 'Start the camera on the Live tab first, then have this person stand in front of it.';
+    ? 'Camera is on. Check the preview above: the box and face outline should follow this person before you capture.'
+    : 'Start the camera to capture from it, or add clear photos of their face from your album. Body measurements (height, hair, build) only come from the room camera.';
 }
 
 async function savePerson(ev) {
@@ -753,14 +896,14 @@ async function savePerson(ev) {
     alertOnEnter: f.elements.alertOnEnter.checked,
     notes: f.elements.notes.value.trim(),
     faceDescriptors: e.faceDescriptors,
+    faceThumbs: e.faceThumbs,
     samples: e.samples,
   };
   if (!profile.name) return toast('Name is required', 'error');
   try {
     await store.saveProfile(profile);
     await loadProfiles();
-    f.classList.add('hidden');
-    state.editing = null;
+    closePersonForm();
     toast(`${profile.name} saved`);
   } catch (err) {
     toast(err.message, 'error');
@@ -780,6 +923,7 @@ async function captureFaces(n = 5) {
       const face = faces.sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h)[0];
       if (face) {
         state.editing.faceDescriptors.push(face.descriptor);
+        state.editing.faceThumbs.push(cropFace(els.video, face.box));
         got += 1;
         siren.beep(880, 80);
         updateSampleCounts();
@@ -840,6 +984,96 @@ async function captureBody() {
     btn.disabled = false;
     updateSampleCounts();
   }
+}
+
+// ---------------------------------------------------------------- album photos
+async function fileToCanvas(file, maxSide = 1280) {
+  let bitmap;
+  try {
+    bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    bitmap = await createImageBitmap(file);
+  }
+  const scale = Math.min(1, maxSide / Math.max(bitmap.width, bitmap.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bitmap.width * scale));
+  c.height = Math.max(1, Math.round(bitmap.height * scale));
+  c.getContext('2d').drawImage(bitmap, 0, 0, c.width, c.height);
+  bitmap.close?.();
+  return c;
+}
+
+async function importPhotos(files) {
+  if (!state.editing || !files.length) return;
+  const review = els.photoReview;
+  review.classList.remove('hidden');
+  review.innerHTML = '<p class="muted small">Loading the face models…</p>';
+  let engine;
+  try {
+    engine = await ensureEngine();
+  } catch (e) {
+    review.innerHTML = `<p class="muted small">Could not load the face models: ${esc(e.message)}</p><div class="actions"><button type="button" id="btnCancelPhotoFaces">Close</button></div>`;
+    return;
+  }
+  const found = [];
+  const notes = [];
+  for (const file of files) {
+    review.innerHTML = `<p class="muted small">Looking for faces in ${esc(file.name)}…</p>`;
+    let canvas;
+    try {
+      canvas = await fileToCanvas(file, 1280);
+    } catch {
+      notes.push(`${file.name}: could not read this image (HEIC photos need converting to JPEG first)`);
+      continue;
+    }
+    let faces = [];
+    try {
+      faces = await engine.detectFaces(canvas);
+    } catch {
+      notes.push(`${file.name}: face detection failed`);
+      continue;
+    }
+    faces.sort((a, b) => b.box.w * b.box.h - a.box.w * a.box.h);
+    if (!faces.length) {
+      notes.push(`${file.name}: no face found`);
+      continue;
+    }
+    faces.forEach((f, i) => found.push({ descriptor: f.descriptor, thumb: cropFace(canvas, f.box), checked: i === 0, file: file.name, several: faces.length > 1 }));
+  }
+  state.photoCandidates = found;
+  const who = els.personForm.elements.name.value.trim() || 'this person';
+  review.innerHTML = `
+    ${found.length
+      ? `<p class="small">Tick the faces that are <b>${esc(who)}</b>${found.some((f) => f.several) ? ' (some photos have several faces; the largest one is pre-selected)' : ''}:</p>
+         <div class="faces">${found.map((f, i) => `<label class="face" title="${esc(f.file)}"><input type="checkbox" data-cand="${i}" ${f.checked ? 'checked' : ''}><img src="${f.thumb}" alt=""></label>`).join('')}</div>`
+      : ''}
+    ${notes.length ? `<p class="muted small">${notes.map(esc).join('<br>')}</p>` : ''}
+    <div class="actions">
+      ${found.length ? '<button type="button" id="btnAddPhotoFaces" class="primary">Add selected faces</button>' : ''}
+      <button type="button" id="btnCancelPhotoFaces">${found.length ? 'Cancel' : 'Close'}</button>
+    </div>`;
+}
+
+function addPhotoFaces() {
+  const cands = state.photoCandidates || [];
+  let n = 0;
+  for (const input of els.photoReview.querySelectorAll('input[data-cand]')) {
+    const c = cands[Number(input.dataset.cand)];
+    if (!input.checked || !c || !state.editing) continue;
+    state.editing.faceDescriptors.push(c.descriptor);
+    state.editing.faceThumbs.push(c.thumb);
+    n += 1;
+  }
+  closePhotoReview();
+  updateSampleCounts();
+  toast(n ? `Added ${n} face sample${n > 1 ? 's' : ''} from your photos` : 'No faces were selected', n ? '' : 'error');
+}
+
+function closePhotoReview() {
+  if (!els.photoReview) return;
+  els.photoReview.classList.add('hidden');
+  els.photoReview.innerHTML = '';
+  state.photoCandidates = null;
 }
 
 // ---------------------------------------------------------------- events
@@ -944,12 +1178,22 @@ async function onEventAction(ev) {
 
 async function learnFromEvent(event, profile) {
   const f = event.features || {};
-  const p = { ...profile, samples: [...(profile.samples || [])], faceDescriptors: [...(profile.faceDescriptors || [])] };
+  const p = { ...profile, samples: [...(profile.samples || [])], faceDescriptors: [...(profile.faceDescriptors || [])], faceThumbs: [...(profile.faceThumbs || [])] };
+  while (p.faceThumbs.length < p.faceDescriptors.length) p.faceThumbs.push(null);
+  p.faceThumbs.length = p.faceDescriptors.length;
   const sample = { t: event.startedAt, height: f.heightCm ?? null, build: f.build ?? null, hair: f.hair ?? null, source: 'confirm' };
   if ([sample.height, sample.build, sample.hair].some(Number.isFinite)) p.samples.push(sample);
-  for (const d of f.faceDescriptors || []) if (Array.isArray(d) && d.length === 128) p.faceDescriptors.push(d);
+  for (const d of f.faceDescriptors || []) {
+    if (Array.isArray(d) && d.length === 128) {
+      p.faceDescriptors.push(d);
+      p.faceThumbs.push(null);
+    }
+  }
   while (p.samples.length > 300) p.samples.shift();
-  while (p.faceDescriptors.length > 40) p.faceDescriptors.shift();
+  while (p.faceDescriptors.length > 40) {
+    p.faceDescriptors.shift();
+    p.faceThumbs.shift();
+  }
   await store.saveProfile(p);
   await store.updateEvent(event.id, { confirmedPersonId: p.id, personId: p.id, personName: p.name, verdict: 'known' });
   await loadProfiles();
@@ -1232,9 +1476,30 @@ function bind() {
   els.btnDismissAlarm.addEventListener('click', dismissAlarm);
 
   els.btnNewPerson.addEventListener('click', () => openPersonForm(null));
-  els.btnCancelPerson.addEventListener('click', () => {
-    els.personForm.classList.add('hidden');
-    state.editing = null;
+  els.btnCancelPerson.addEventListener('click', closePersonForm);
+  els.btnEnrollStartCamera.addEventListener('click', startCamera);
+  els.photoInput.addEventListener('change', (e) => {
+    const files = [...e.target.files];
+    e.target.value = '';
+    importPhotos(files);
+  });
+  els.photoReview.addEventListener('click', (e) => {
+    if (e.target.closest('#btnAddPhotoFaces')) addPhotoFaces();
+    else if (e.target.closest('#btnCancelPhotoFaces')) closePhotoReview();
+  });
+  els.faceThumbs.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-remove-face]');
+    if (!b || !state.editing) return;
+    const i = Number(b.dataset.removeFace);
+    state.editing.faceDescriptors.splice(i, 1);
+    state.editing.faceThumbs.splice(i, 1);
+    updateSampleCounts();
+  });
+  els.bodySamples.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-remove-body]');
+    if (!b || !state.editing) return;
+    state.editing.samples.splice(Number(b.dataset.removeBody), 1);
+    updateSampleCounts();
   });
   els.personForm.addEventListener('submit', savePerson);
   els.btnCaptureFace.addEventListener('click', () => captureFaces(5));
@@ -1242,6 +1507,7 @@ function bind() {
   els.btnClearSamples.addEventListener('click', () => {
     if (!state.editing) return;
     state.editing.faceDescriptors = [];
+    state.editing.faceThumbs = [];
     state.editing.samples = [];
     updateSampleCounts();
   });

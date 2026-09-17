@@ -132,3 +132,22 @@ legend { padding: 0 .4rem; color: var(--text); font-weight: 600; }
   .live-grid, .two-col { grid-template-columns: 1fr; }
   main { padding: .6rem; }
 }
+
+/* enrollment preview, sample thumbnails and photo import */
+.enroll-preview { position: relative; background: #000; border-radius: 8px; overflow: hidden; aspect-ratio: 16 / 9; border: 1px solid var(--line); }
+.enroll-preview canvas { width: 100%; height: 100%; object-fit: contain; display: block; }
+.preview-off { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; gap: .4rem; }
+#enrollStatus { margin: .4rem 0; }
+.thumbs { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
+.thumbs figure { position: relative; margin: 0; width: 56px; height: 56px; border-radius: 6px; overflow: hidden; border: 1px solid var(--line); background: var(--panel-2); display: grid; place-content: center; font-size: 1.4rem; }
+.thumbs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumbs figure button, .samples button.x { position: absolute; top: 0; right: 0; width: 18px; height: 18px; padding: 0; line-height: 16px; font-size: 12px; border-radius: 0 0 0 6px; background: rgba(0,0,0,.7); border: none; color: #fff; }
+.samples { font-size: .8rem; color: var(--muted); margin-top: .4rem; }
+.samples div { position: relative; padding: .2rem 1.6rem .2rem 0; border-bottom: 1px dashed var(--line); }
+.photo-review { border: 1px solid var(--line); border-radius: 8px; padding: .5rem; margin: .5rem 0; }
+.photo-review .faces { display: flex; flex-wrap: wrap; gap: .5rem; }
+.photo-review label.face { position: relative; width: 72px; height: 72px; border: 2px solid var(--line); border-radius: 8px; overflow: hidden; cursor: pointer; margin: 0; }
+.photo-review label.face img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.photo-review label.face input { position: absolute; top: 4px; left: 4px; margin: 0; width: auto; }
+.photo-review label.face:has(input:checked) { border-color: var(--accent); }
+.card .thumbs figure { width: 40px; height: 40px; }

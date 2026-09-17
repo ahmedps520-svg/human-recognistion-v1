@@ -47,10 +47,10 @@ const fail = (msg) => {
 };
 const assert = (cond, msg) => (cond ? step(`ok: ${msg}`) : fail(msg));
 
-async function waitFor(page, fn, { timeout = 60000, label = 'condition', interval = 250 } = {}) {
+async function waitFor(page, fn, { timeout = 60000, label = 'condition', interval = 250, arg } = {}) {
   const until = Date.now() + timeout;
   while (Date.now() < until) {
-    const v = await page.evaluate(fn);
+    const v = await page.evaluate(fn, arg);
     if (v) return v;
     await page.waitForTimeout(interval);
   }
@@ -170,12 +170,42 @@ try {
   // Enroll the person in the photo.
   await page.click('#tabs button[data-view="people"]');
   await page.click('#btnNewPerson');
+  await waitFor(
+    page,
+    () => document.getElementById('enrollPreview').width > 0 && document.getElementById('enrollPreviewOff').classList.contains('hidden'),
+    { label: 'enrollment preview drawing', timeout: 20000 },
+  );
+  const enrollStatus = await waitFor(
+    page,
+    () => {
+      const t = document.getElementById('enrollStatus').textContent;
+      return t.includes('face ✓') ? t : null;
+    },
+    { label: 'enrollment status reports a face', timeout: 90000 },
+  );
+  step(`enroll status: ${enrollStatus}`);
+  await page.screenshot({ path: path.join(cache, 'enroll-preview.png') });
   await page.fill('#personForm [name=name]', 'Test Person');
   await page.fill('#personForm [name=heightCm]', '175');
   await page.selectOption('#hairLengthSelect', 'short');
   await page.click('#btnCaptureFace');
-  await waitFor(page, () => Number(document.getElementById('faceCount').textContent) >= 3, { label: 'face samples', timeout: 60000 });
-  step(`face samples: ${await page.textContent('#faceCount')}`);
+  await waitFor(page, () => Number(document.getElementById('faceCount').textContent) >= 3, { label: 'face samples', timeout: 120000 });
+  await waitFor(page, () => !document.getElementById('btnCaptureFace').disabled, { label: 'face capture finished', timeout: 120000 });
+  const captured = Number(await page.textContent('#faceCount'));
+  const thumbs = await page.evaluate(() => document.querySelectorAll('#faceThumbs figure img').length);
+  step(`face samples: ${captured}, thumbnails: ${thumbs}`);
+  assert(thumbs === captured, 'one thumbnail per captured face sample');
+
+  // Album photo import: the same sample photo, expect one face candidate.
+  await page.setInputFiles('#photoInput', LOCAL.person);
+  await waitFor(page, () => document.querySelectorAll('#photoReview input[data-cand]').length >= 1, { label: 'faces found in the photo', timeout: 120000 });
+  await page.screenshot({ path: path.join(cache, 'enroll-photo-review.png') });
+  await page.click('#btnAddPhotoFaces');
+  await waitFor(page, (n) => Number(document.getElementById('faceCount').textContent) === n + 1, { label: 'photo face added', timeout: 10000, arg: captured });
+  step('photo import added a face sample');
+  await page.click('#faceThumbs button[data-remove-face="0"]');
+  assert(Number(await page.textContent('#faceCount')) === captured, 'removing a face sample updates the count');
+
   await page.click('#btnCaptureBody');
   await waitFor(page, () => Number(document.getElementById('bodyCount').textContent) >= 1, { label: 'body sample', timeout: 20000 });
   await page.click('#personForm button[type=submit]');
@@ -186,6 +216,10 @@ try {
   });
   step(`profile saved: ${JSON.stringify(profile)}`);
   assert(profile.faces >= 3 && profile.samples === 1, 'profile carries face and body samples');
+  const avatars = await page.evaluate(() => document.querySelectorAll('#peopleList .card .thumbs img').length);
+  assert(avatars >= 1, `person card shows face thumbnails (${avatars})`);
+  const thumbsSaved = await page.evaluate(() => window.roomGuard.state.profiles[0].faceThumbs.filter(Boolean).length);
+  assert(thumbsSaved === profile.faces, 'thumbnails saved alongside descriptors');
 
   // The same person should now be recognised.
   await page.click('#tabs button[data-view="live"]');
