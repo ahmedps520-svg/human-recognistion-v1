@@ -105,6 +105,28 @@ export const DEFAULT_SETTINGS = {
   hairEveryFrames: 3,
   poseModelDelegate: 'GPU',
   blockTelemetry: true, // stop the MediaPipe runtime from posting usage logs to Google
+  faceDetector: 'ssd', // 'ssd' (more accurate, finds smaller faces) or 'tiny' (lighter)
+  tfBackend: 'auto', // face model runtime: 'auto' picks WASM on iPad/iPhone (exact maths) and WebGL elsewhere
+  // Claude vision assistant (optional; key stays in this browser)
+  aiEnabled: false,
+  aiApiKey: '',
+  aiModel: 'claude-opus-5',
+  aiDescribeVisits: true, // one description per visit, written into the event
+  aiSecondOpinion: true, // ask Claude which household member the visible attributes fit when the camera is unsure
+  aiMaxPerHour: 40,
+};
+
+export const AI_MODELS = {
+  'claude-opus-5': 'Claude Opus 5 (best judgement)',
+  'claude-sonnet-5': 'Claude Sonnet 5 (balanced)',
+  'claude-haiku-4-5': 'Claude Haiku 4.5 (fastest, cheapest)',
+};
+
+export const AGE_GROUP_LABELS = {
+  baby: 'Baby / toddler (0–3)',
+  child: 'Child (4–12)',
+  teen: 'Teenager',
+  adult: 'Adult',
 };
 
 // Per-feature weights and tolerances used by identify.js. Face dominates when

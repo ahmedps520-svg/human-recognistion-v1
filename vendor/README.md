@@ -8,6 +8,8 @@ and pinned to known-good versions. Do not edit them by hand.
 | `mediapipe-tasks-vision-1.0.1.mjs` | `@mediapipe/tasks-vision` | 1.0.1 | Apache-2.0 |
 | `face-api-1.7.15.esm.js` | `@vladmandic/face-api` (bundles TensorFlow.js) | 1.7.15 | MIT |
 | `supabase-js-2.116.0.umd.js` | `@supabase/supabase-js` | 2.116.0 | MIT |
+| `anthropic-sdk-0.126.0.esm.js` | `@anthropic-ai/sdk` (bundled for the browser with esbuild: `esbuild node_modules/@anthropic-ai/sdk/index.mjs --bundle --format=esm --platform=browser --target=es2020 --minify`) | 0.126.0 | MIT |
+| `tfjs-wasm/*.wasm` | `@tensorflow/tfjs-backend-wasm` binaries (must match the TensorFlow.js version inside face-api, currently 4.22.0) | 4.22.0 | Apache-2.0 |
 
 The heavy assets (MediaPipe WASM runtime, face-api model weights, MediaPipe `.task`
 and `.tflite` models) are loaded from the pinned CDN URLs listed in

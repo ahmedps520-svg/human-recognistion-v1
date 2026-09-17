@@ -14,6 +14,8 @@ always on and physical.
 - [x] Events log with confirmation feedback that updates the person's samples.
 - [x] Siren, notifications, door-lock webhook, arm/disarm.
 - [x] Enrollment preview with readiness indicators, face thumbnails, album photo import.
+- [x] iPad support: exact WASM face runtime on Apple mobile devices, SSD face detector, screen wake lock, diagnostics.
+- [x] Claude vision assistant: per-visit descriptions and attribute-based second opinions (never face recognition).
 - [ ] Field test with the whole family for two weeks; tune weights and sigmas from confirmed events.
 
 ## Phase 2 — Accuracy (months 3–4)

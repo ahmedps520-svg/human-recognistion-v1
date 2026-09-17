@@ -1,7 +1,7 @@
 // Room Guard: wires the camera, the vision models, tracking, identification,
 // recording, alarms and the UI together.
 
-import { APP_VERSION, POSE_EDGES, HAIR_LENGTH_LABELS, HAIR_LENGTH_INDEX } from './config.js';
+import { APP_VERSION, POSE_EDGES, HAIR_LENGTH_LABELS, HAIR_LENGTH_INDEX, AGE_GROUP_LABELS, AI_MODELS } from './config.js';
 import { loadSettings, saveSettings, LOCAL_KEYS, localGet, localSet, exportLocalData, importLocalData } from './settings.js';
 import { VisionEngine, matchFacesToPoses } from './vision.js';
 import { bodyMetrics, hairMetrics, refineHeadTop, buildObservation, fitCalibration, median } from './features.js';
@@ -9,6 +9,7 @@ import { identify, Tracker, summarizeTrack } from './identify.js';
 import { ClipRecorder, captureSnapshot } from './recorder.js';
 import { Store, clipPathFor } from './storage.js';
 import { Siren, requestNotificationPermission, notify, triggerDoorLock } from './alarm.js';
+import { ClaudeAssistant, rosterFromProfiles, secondOpinion, describePerson } from './ai.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -22,6 +23,7 @@ for (const el of document.querySelectorAll('[id]')) els[el.getAttribute('id')] =
 
 const store = new Store();
 const siren = new Siren();
+const ai = new ClaudeAssistant();
 
 const state = {
   settings: loadSettings(),
@@ -48,6 +50,7 @@ const state = {
   engineLoading: null,
   enrollPreviewRaf: 0,
   photoCandidates: null,
+  wakeLock: null,
   calib: { collecting: false, samples: [], refHeight: null, fit: null, reason: '' },
   view: 'live',
 };
@@ -76,7 +79,10 @@ function showView(name) {
   if (name === 'events') renderEvents();
   if (name === 'people') renderPeople();
   if (name === 'calibrate') renderCalibration();
-  if (name === 'settings') refreshStorageInfo();
+  if (name === 'settings') {
+    refreshStorageInfo();
+    renderDiagnostics();
+  }
 }
 
 function profileById(id) {
@@ -101,7 +107,7 @@ function labelFor(identity) {
   if (!identity) return 'Identifying…';
   switch (identity.verdict) {
     case 'known':
-      return `${identity.name} ${pct(identity.confidence)}`;
+      return `${identity.name} ${pct(identity.confidence)}${identity.viaAi ? ' · Claude' : ''}`;
     case 'ambiguous':
       return `${identity.name}? ${pct(identity.confidence)}`;
     case 'unknown':
@@ -236,6 +242,7 @@ async function startCamera() {
     els.btnStop.disabled = false;
     els.btnSnapshot.disabled = false;
     if (!store.remote) requestPersistentStorage({ quiet: true });
+    requestWakeLock();
     log('Camera started');
     requestAnimationFrame(loop);
   } catch (e) {
@@ -254,13 +261,41 @@ async function ensureEngine() {
     if (!state.engine) state.engine = new VisionEngine({ onStatus: (m) => (els.modelStatus.textContent = m) });
     const s = state.settings;
     state.engineLoading = state.engine
-      .load({ delegate: s.poseModelDelegate || 'GPU', blockTelemetry: s.blockTelemetry !== false })
+      .load({
+        delegate: s.poseModelDelegate || 'GPU',
+        blockTelemetry: s.blockTelemetry !== false,
+        faceDetector: s.faceDetector || 'ssd',
+        tfBackend: s.tfBackend || 'auto',
+      })
+      .then(() => {
+        const d = state.engine.diagnostics();
+        log(`Models ready: face runtime ${d.tfBackend}${d.float32 === false ? ' (16-bit)' : ''}, detector ${d.faceDetector}, pose ${d.poseDelegate}`);
+        renderDiagnostics();
+      })
       .finally(() => {
         state.engineLoading = null;
       });
   }
   await state.engineLoading;
   return state.engine;
+}
+
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator && !state.wakeLock) {
+      state.wakeLock = await navigator.wakeLock.request('screen');
+      state.wakeLock.addEventListener('release', () => {
+        state.wakeLock = null;
+      });
+    }
+  } catch (e) {
+    console.warn('Screen wake lock unavailable', e);
+  }
+}
+
+function releaseWakeLock() {
+  state.wakeLock?.release().catch(() => {});
+  state.wakeLock = null;
 }
 
 function stopStream() {
@@ -280,6 +315,7 @@ async function stopCamera() {
   }
   if (state.tracker) state.tracker.tracks = [];
   await finalizeRecording();
+  releaseWakeLock();
   stopStream();
   const ctx = els.overlay.getContext('2d');
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
@@ -380,6 +416,7 @@ function processFrame(now) {
     els.fpsBadge.textContent = `${state.fps.value.toFixed(state.fps.value < 2 ? 1 : 0)} fps`;
     const t = state.timing;
     els.fpsBadge.title = `pose ${t.pose.toFixed(0)} ms · hair ${t.hair.toFixed(0)} ms · face ${t.face.toFixed(0)} ms`;
+    if (state.view === 'settings') renderDiagnostics();
   }
 }
 
@@ -394,7 +431,7 @@ function handlePresence(active, ended, now) {
   for (const tr of active) {
     let p = state.presence.get(tr.id);
     if (!p) {
-      p = { trackId: tr.id, eventId: null, eventPromise: null, alarmed: false, locked: false, notified: false };
+      p = { trackId: tr.id, eventId: null, eventPromise: null, alarmed: false, locked: false, notified: false, ai: null, aiIdentity: null, aiPending: false, aiTried: false };
       state.presence.set(tr.id, p);
       ensureRecording();
     }
@@ -405,14 +442,20 @@ function handlePresence(active, ended, now) {
           p.eventPromise = null;
         });
     }
-    const id = tr.identity;
-    if (id.verdict === 'known' && id.stable && !p.notified) {
+    if (!p.aiTried && aiUsable() && (tr.identity.stable || now - tr.firstSeen > 2500)) {
+      p.aiTried = true;
+      const wantOpinion = s.aiSecondOpinion && tr.identity.verdict !== 'known';
+      if (s.aiDescribeVisits || wantOpinion) askClaudeAboutTrack(tr, p, { reason: wantOpinion ? 'unsure' : 'describe' });
+    }
+    const id = effectiveIdentity(tr);
+    if (id.verdict === 'known' && (id.stable || id.viaAi) && !p.notified) {
       p.notified = true;
-      log(`${id.name} is in the room (${pct(id.confidence)})`);
+      log(`${id.name} is in the room (${pct(id.confidence)}${id.viaAi ? ', Claude' : ''})`);
       const prof = profileById(id.profileId);
       if (prof?.alertOnEnter && s.notifyEnabled) notify('Room Guard', `${id.name} entered your room`);
     }
-    if (state.armed && id.verdict === 'unknown' && tr.unknownSince != null && now - tr.unknownSince >= s.unknownGraceSec * 1000 && !p.alarmed) {
+    const aiHold = p.aiPending && now - tr.firstSeen < 20000; // give Claude up to 20 s to answer before alarming
+    if (state.armed && id.verdict === 'unknown' && !aiHold && tr.unknownSince != null && now - tr.unknownSince >= s.unknownGraceSec * 1000 && !p.alarmed) {
       p.alarmed = true;
       fireAlarm(tr, p);
     }
@@ -427,6 +470,85 @@ function handlePresence(active, ended, now) {
     if (state.session && now - state.emptySince > s.clipTailSec * 1000) finalizeRecording();
   } else {
     state.emptySince = null;
+  }
+}
+
+/** The camera's verdict, upgraded by Claude's attribute-based match when the camera itself is not sure. */
+function effectiveIdentity(tr, p = state.presence.get(tr.id)) {
+  const id = tr.identity;
+  if (p?.aiIdentity && id.verdict !== 'known') {
+    return { ...id, verdict: 'known', profileId: p.aiIdentity.profileId, name: p.aiIdentity.name, confidence: p.aiIdentity.confidence, viaAi: true };
+  }
+  return id;
+}
+
+function aiUsable() {
+  return !!state.settings.aiEnabled && ai.ready;
+}
+
+function aiRecord(result, opinion) {
+  if (!result) return null;
+  return {
+    model: result.model,
+    summary: result.summary,
+    people: result.people,
+    refused: !!result.refused,
+    match: opinion ? { name: opinion.name, profileId: opinion.profileId, confidence: opinion.confidence, reasoning: opinion.reasoning } : null,
+  };
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1]);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+async function askClaudeAboutTrack(tr, p, { reason = 'describe', manual = false } = {}) {
+  const s = state.settings;
+  if (!aiUsable()) {
+    if (manual) toast('Enable Claude and add an API key in Settings first', 'error');
+    return null;
+  }
+  if (p) p.aiPending = true;
+  if (els.aiStatus) els.aiStatus.textContent = 'Asking Claude…';
+  try {
+    const snap = await captureSnapshot(els.video, { maxWidth: 1024, quality: 0.85 });
+    if (!snap?.blob) throw new Error('No frame available');
+    const sum = tr ? summarizeTrack(tr) : null;
+    const hints = [];
+    if (sum && Number.isFinite(sum.heightCm)) hints.push(`estimated height ${sum.heightCm.toFixed(0)} cm`);
+    if (sum && Number.isFinite(sum.hair)) hints.push(`hair looks ${hairLabel(sum.hair)}`);
+    if (tr) hints.push(`camera verdict so far: ${tr.identity.verdict}${tr.identity.name ? ` (${tr.identity.name} ${pct(tr.identity.confidence)})` : ''}`);
+    const result = await ai.describe({
+      jpegBase64: await blobToBase64(snap.blob),
+      roster: rosterFromProfiles(state.profiles),
+      hints: hints.join(', '),
+      model: s.aiModel,
+      maxPerHour: s.aiMaxPerHour,
+    });
+    const opinion = secondOpinion(result, state.profiles);
+    if (p) {
+      p.ai = result;
+      if (opinion && tr && tr.identity.verdict !== 'known') p.aiIdentity = opinion;
+    }
+    const usage = result.usage || {};
+    const tokens = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || 0) + (usage.cache_creation_input_tokens || 0) + (usage.output_tokens || 0);
+    if (result.refused) log(`Claude declined to describe this frame${result.explanation ? `: ${result.explanation}` : ''}`, 'warn');
+    else log(`Claude (${reason}): ${result.summary}${opinion ? ` → ${opinion.name} ${pct(opinion.confidence)}` : ''} · ${(tokens / 1000).toFixed(1)}k tokens`);
+    if (p?.eventId && tr) store.updateEvent(p.eventId, { features: { ...summarizeTrack(tr), ai: aiRecord(result, opinion) } }).catch(() => {});
+    if (state.view === 'events') renderEvents();
+    if (manual) toast(result.refused ? 'Claude declined' : result.summary || 'Claude answered');
+    return result;
+  } catch (e) {
+    log(`Claude: ${e.message}`, 'error');
+    if (manual) toast(e.message, 'error');
+    return null;
+  } finally {
+    if (p) p.aiPending = false;
+    if (els.aiStatus) els.aiStatus.textContent = '';
   }
 }
 
@@ -472,14 +594,15 @@ async function openEvent(tr, p) {
 
 async function closeEvent(tr, p) {
   if (p.eventPromise) await p.eventPromise;
-  const who = personFor(tr.identity);
+  const id = effectiveIdentity(tr, p);
+  const who = personFor(id);
   const patch = {
     endedAt: new Date().toISOString(),
-    verdict: tr.identity.verdict,
+    verdict: id.verdict,
     personId: who.id,
     personName: who.name,
-    confidence: tr.identity.confidence,
-    features: summarizeTrack(tr),
+    confidence: id.confidence,
+    features: { ...summarizeTrack(tr), ...(p.ai ? { ai: aiRecord(p.ai, p.aiIdentity) } : {}) },
     alarmTriggered: p.alarmed,
     lockTriggered: p.locked,
   };
@@ -492,7 +615,7 @@ async function closeEvent(tr, p) {
   } catch (e) {
     log(`Could not save event: ${e.message}`, 'error');
   }
-  log(`${labelFor(tr.identity)} left`);
+  log(`${labelFor(id)} left`);
   if (state.view === 'events') renderEvents();
 }
 
@@ -565,7 +688,7 @@ function draw(detections, tracks, W, H) {
 
   for (const d of detections) {
     const tr = trackByBox.get(d.box);
-    const identity = tr?.identity || null;
+    const identity = tr ? effectiveIdentity(tr) : null;
     const color = colorFor(identity);
     const pts = d.metrics.points;
 
@@ -648,14 +771,30 @@ function drawLabel(ctx, x, y, lines, color, W) {
   }
 }
 
+let presenceLastAt = 0;
+let presenceLastHtml = '';
+function setPresenceHtml(html) {
+  if (html === presenceLastHtml) return;
+  presenceLastHtml = html;
+  els.presence.innerHTML = html;
+}
+
 function renderPresence(tracks) {
+  const askable = aiUsable() && tracks.length > 0;
+  els.btnAskAi.classList.toggle('hidden', !aiUsable());
+  els.btnAskAi.disabled = !askable;
   if (!tracks.length) {
-    els.presence.innerHTML = '<p class="muted">Nobody detected.</p>';
+    setPresenceHtml('<p class="muted">Nobody detected.</p>');
     return;
   }
+  // Re-rendering replaces the panel's buttons, so keep it to a few times per second.
+  const now = performance.now();
+  if (now - presenceLastAt < 400) return;
+  presenceLastAt = now;
   const html = tracks
     .map((tr) => {
-      const id = tr.identity;
+      const id = effectiveIdentity(tr);
+      const p = state.presence.get(tr.id);
       const sum = summarizeTrack(tr);
       const cues = [];
       if (Number.isFinite(sum.heightCm)) cues.push(`≈ ${sum.heightCm.toFixed(0)} cm`);
@@ -663,16 +802,38 @@ function renderPresence(tracks) {
       if (Number.isFinite(sum.build)) cues.push(`build ${sum.build.toFixed(2)}`);
       cues.push(sum.faceDescriptors.length ? 'face seen' : 'no face yet');
       cues.push(`${Math.round((tr.lastSeen - tr.firstSeen) / 1000)} s`);
-      const runnerUp = (id.ranked || []).slice(0, 3).map((r) => `${esc(r.name)} ${pct(r.score)}`).join(', ');
+      const runnerUp = (id.ranked || [])
+        .slice(0, 3)
+        .map((r) => `${esc(r.name)} ${pct(r.score)}${r.parts?.face ? ` (face ${r.parts.face.d.toFixed(2)})` : ''}`)
+        .join(', ');
+      let aiNote = '';
+      if (p?.aiPending) aiNote = '<div class="ai-note muted">Claude is looking…</div>';
+      else if (p?.ai) {
+        const person = p.ai.people?.[0];
+        aiNote = `<div class="ai-note">${esc(p.ai.refused ? 'Claude declined to describe this frame' : p.ai.summary)}${
+          person ? `<span class="muted">${esc(describePerson(person))}${person.bestMatch && person.bestMatch !== 'unknown' ? ` · fits ${esc(person.bestMatch)} ${pct(person.confidence)}` : ' · no household match'}</span>` : ''
+        }</div>`;
+      }
+      const askBtn = aiUsable() && !p?.aiPending ? `<div class="actions"><button type="button" data-ask-ai="${tr.id}">Ask Claude</button></div>` : '';
       return `<div class="person-now" style="border-left-color:${colorFor(id)}">
         <div class="name"><span>${esc(labelFor(id))}</span>${p_alarm(tr)}</div>
         <div class="bar"><i style="width:${Math.round((id.confidence || 0) * 100)}%;background:${colorFor(id)}"></i></div>
         <div class="cues">${cues.map(esc).join('<span>·</span>')}</div>
         ${runnerUp ? `<div class="cues muted">scores: ${runnerUp}</div>` : ''}
+        ${aiNote}${askBtn}
       </div>`;
     })
     .join('');
-  els.presence.innerHTML = html;
+  setPresenceHtml(html);
+}
+
+/** Ask Claude about the person the camera is least sure about (or the first one). */
+function askClaudeNow() {
+  const tracks = state.tracker?.tracks || [];
+  if (!tracks.length) return toast('Nobody is in view right now');
+  const rank = { unknown: 0, insufficient: 1, ambiguous: 2, known: 3 };
+  const tr = [...tracks].sort((a, b) => (rank[effectiveIdentity(a).verdict] ?? 9) - (rank[effectiveIdentity(b).verdict] ?? 9))[0];
+  return askClaudeAboutTrack(tr, state.presence.get(tr.id), { reason: 'manual', manual: true });
 }
 
 function p_alarm(tr) {
@@ -713,6 +874,7 @@ function renderPeople() {
           <span>${Number.isFinite(p.heightCm) ? `${p.heightCm} cm` : '– cm'}</span>
           <span>${Number.isFinite(p.weightKg) ? `${p.weightKg} kg` : '– kg'}</span>
           <span>${esc(HAIR_LENGTH_LABELS[p.hairLength] || p.hairLength || '')}</span>
+          ${p.ageGroup ? `<span>${esc(AGE_GROUP_LABELS[p.ageGroup] || p.ageGroup)}</span>` : ''}
           <span>${p.faceDescriptors?.length || 0} face · ${p.samples?.length || 0} body samples</span>
         </div>
         ${(p.faceThumbs || []).some(Boolean) ? `<div class="thumbs">${(p.faceThumbs || []).filter(Boolean).slice(0, 5).map((t) => `<figure><img src="${t}" alt=""></figure>`).join('')}</div>` : ''}
@@ -741,6 +903,7 @@ function openPersonForm(profile) {
   f.elements.heightCm.value = e.heightCm ?? '';
   f.elements.weightKg.value = e.weightKg ?? '';
   f.elements.hairLength.value = e.hairLength || 'short';
+  f.elements.ageGroup.value = e.ageGroup || '';
   f.elements.color.value = e.color || '#4ade80';
   f.elements.alertOnEnter.checked = !!e.alertOnEnter;
   f.elements.notes.value = e.notes || '';
@@ -892,6 +1055,7 @@ async function savePerson(ev) {
     heightCm: num(f.elements.heightCm.value),
     weightKg: num(f.elements.weightKg.value),
     hairLength: f.elements.hairLength.value,
+    ageGroup: f.elements.ageGroup.value || '',
     color: f.elements.color.value,
     alertOnEnter: f.elements.alertOnEnter.checked,
     notes: f.elements.notes.value.trim(),
@@ -1107,6 +1271,7 @@ async function renderEvents() {
           <div class="title"><span>${title}</span><span class="tag ${esc(e.verdict)}">${esc(e.verdict)} ${e.confidence != null ? pct(e.confidence) : ''}</span></div>
           <div class="meta">${fmtDate(e.startedAt)} · ${duration} ${e.alarmTriggered ? '· <span class="tag alarm">alarm</span>' : ''} ${e.lockTriggered ? '· <span class="tag">door locked</span>' : ''}</div>
           <div class="meta">${cues.length ? cues.map(esc).join(' · ') : 'no body measurements'}</div>
+          ${f.ai?.summary ? `<div class="ai-note">${esc(f.ai.summary)}${f.ai.match ? `<span class="muted">Claude: fits ${esc(f.ai.match.name)} ${pct(f.ai.match.confidence)}</span>` : ''}</div>` : ''}
           <div class="actions">
             <button type="button" data-act="play" ${e.clipPath ? '' : 'disabled'}>${e.clipPath ? 'Play clip' : 'No clip'}</button>
             <button type="button" data-act="download" ${e.clipPath ? '' : 'disabled'} title="Save the clip to your computer">Download</button>
@@ -1331,10 +1496,43 @@ function readSettingsForm() {
   return s;
 }
 
+function renderDiagnostics() {
+  if (!els.diagnostics) return;
+  const d = state.engine?.loaded ? state.engine.diagnostics() : null;
+  const t = state.timing;
+  const lines = [];
+  if (!d) lines.push('Models not loaded yet (start the camera).');
+  else {
+    lines.push(`face runtime: ${d.tfBackend}${d.float32 === false ? ' with 16-bit floats (recognition degraded: set runtime to WASM)' : ''} · detector: ${d.faceDetector} · pose: ${d.poseDelegate}`);
+    lines.push(`device: ${d.appleMobile ? 'iPhone / iPad' : 'desktop or other'} · ${d.userAgent}`);
+  }
+  lines.push(`timing: pose ${t.pose.toFixed(0)} ms · hair ${t.hair.toFixed(0)} ms · face ${t.face.toFixed(0)} ms · ${state.fps.value.toFixed(1)} fps`);
+  lines.push(`storage: ${store.remote ? 'supabase' : 'browser'} · calibration: ${state.calibration ? 'yes' : 'no'} · people: ${state.profiles.length} (${state.profiles.filter((p) => p.faceDescriptors?.length).length} with face samples)`);
+  lines.push(`claude: ${state.settings.aiEnabled ? (ai.ready ? `on (${state.settings.aiModel}), ${ai.callsInLastHour()} calls this hour` : 'enabled but no API key') : 'off'}`);
+  els.diagnostics.textContent = lines.join('\n');
+}
+
+async function testClaude() {
+  await applySettings(readSettingsForm());
+  if (!state.settings.aiEnabled) return toast('Tick "Enable Claude" first', 'error');
+  if (!ai.ready) return toast('Enter your Anthropic API key first', 'error');
+  if (!state.running) return toast('Start the camera first so there is a frame to send', 'error');
+  const tr = state.tracker?.tracks[0] || null;
+  const p = tr ? state.presence.get(tr.id) : null;
+  els.btnTestAi.disabled = true;
+  try {
+    await askClaudeAboutTrack(tr, p, { reason: 'test', manual: true });
+  } finally {
+    els.btnTestAi.disabled = false;
+    renderDiagnostics();
+  }
+}
+
 async function applySettings(next, { reconnect = true } = {}) {
   const prev = state.settings;
   state.settings = next;
   saveSettings(next);
+  ai.configure({ apiKey: next.aiApiKey });
   els.videoWrap.classList.toggle('mirror', !!next.mirror);
   state.tracker?.setOptions({ threshold: next.matchThreshold, margin: next.matchMargin });
   if (state.recorder) state.recorder.maxSec = next.clipMaxSec;
@@ -1457,6 +1655,19 @@ function bind() {
     if (b) showView(b.dataset.view);
   });
   els.hairLengthSelect.innerHTML = Object.entries(HAIR_LENGTH_LABELS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  els.ageGroupSelect.innerHTML = `<option value="">Age group…</option>${Object.entries(AGE_GROUP_LABELS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('')}`;
+  els.aiModelSelect.innerHTML = Object.entries(AI_MODELS).map(([k, v]) => `<option value="${k}">${esc(v)}</option>`).join('');
+  els.presence.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-ask-ai]');
+    if (!b) return;
+    const tr = state.tracker?.tracks.find((t) => t.id === Number(b.dataset.askAi));
+    if (tr) askClaudeAboutTrack(tr, state.presence.get(tr.id), { reason: 'manual', manual: true });
+  });
+  els.btnTestAi.addEventListener('click', testClaude);
+  els.btnAskAi.addEventListener('click', askClaudeNow);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && state.running) requestWakeLock();
+  });
 
   els.btnStart.addEventListener('click', startCamera);
   els.btnStop.addEventListener('click', stopCamera);
@@ -1574,6 +1785,7 @@ async function init() {
   bind();
   renderSettings();
   updateArmedUI();
+  ai.configure({ apiKey: state.settings.aiApiKey });
   await store.configure(state.settings);
   await loadProfiles();
   await loadCalibration();
@@ -1582,6 +1794,6 @@ async function init() {
 }
 
 // Exposed for debugging and the end-to-end test.
-window.roomGuard = { state, store, siren, startCamera, stopCamera, identify, summarizeTrack };
+window.roomGuard = { state, store, siren, ai, startCamera, stopCamera, identify, summarizeTrack };
 
 init();

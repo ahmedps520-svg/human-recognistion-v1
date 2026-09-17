@@ -84,7 +84,7 @@ const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(String(e)));
 const externalRequests = [];
 page.on('request', (r) => {
-  if (!r.url().startsWith(url) && !/cdn\.jsdelivr\.net|storage\.googleapis\.com\/mediapipe-models/.test(r.url())) externalRequests.push(r.url());
+  if (!r.url().startsWith(url) && !/cdn\.jsdelivr\.net|storage\.googleapis\.com\/mediapipe-models|api\.anthropic\.com/.test(r.url())) externalRequests.push(r.url());
 });
 page.on('requestfailed', (r) => console.log(`  request failed: ${r.url().slice(0, 160)} (${r.failure()?.errorText})`));
 page.on('console', (m) => {
@@ -105,6 +105,30 @@ await routeDir(/cdn\.jsdelivr\.net\/npm\/@mediapipe\/tasks-vision@[^/]+\/wasm\/(
 await routeDir(/cdn\.jsdelivr\.net\/npm\/@vladmandic\/face-api@[^/]+\/model\/([^?#]+)/, LOCAL.faceModelDir);
 await page.route(REMOTE.poseModel, (route) => serveLocal(route, LOCAL.poseModel));
 await page.route(REMOTE.segModel, (route) => serveLocal(route, LOCAL.segModel));
+
+// Optional: force the face-model runtime (E2E_TF_BACKEND=wasm exercises the vendored WASM binaries).
+const forcedBackend = process.env.E2E_TF_BACKEND || '';
+await page.addInitScript((backend) => {
+  if (backend) localStorage.setItem('hr.settings.v1', JSON.stringify({ tfBackend: backend }));
+}, forcedBackend);
+
+// Stubbed Anthropic API: the app talks to it through the vendored SDK bundle.
+let aiStub = { mode: 'unknown', calls: 0, lastBody: null };
+await page.route(/https:\/\/api\.anthropic\.com\/v1\/messages(\?.*)?$/, async (route, request) => {
+  aiStub.calls += 1;
+  aiStub.lastBody = request.postDataJSON();
+  const match = aiStub.mode === 'match';
+  const payload = {
+    summary: match ? 'An adult with short dark hair in a black sleeveless top is standing with arms out.' : 'An adult with short dark hair is stretching on a mat.',
+    people: [{ ageGroup: 'adult', hairLength: 'short', build: 'slim', clothing: 'black sleeveless top, black shorts', activity: 'yoga pose', bestMatch: match ? 'Someone Else' : 'unknown', confidence: match ? 0.9 : 0.2, reasoning: match ? 'adult, short hair, height fits' : 'no clear fit' }],
+  };
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    headers: { 'access-control-allow-origin': '*' },
+    body: JSON.stringify({ id: 'msg_stub', type: 'message', role: 'assistant', model: aiStub.lastBody?.model || 'stub', content: [{ type: 'text', text: JSON.stringify(payload) }], stop_reason: 'end_turn', stop_sequence: null, usage: { input_tokens: 1200, output_tokens: 120 } }),
+  });
+});
 
 // Fake camera: a canvas that keeps redrawing the sample photo.
 await page.addInitScript(() => {
@@ -143,6 +167,9 @@ try {
   await page.click('#btnStart');
   await waitFor(page, () => window.roomGuard.state.running, { label: 'camera + models', timeout: 180000 });
   step(`models loaded: ${await page.textContent('#modelStatus')}`);
+  const diag = await page.evaluate(() => window.roomGuard.state.engine.diagnostics());
+  step(`diagnostics: backend=${diag.tfBackend} float32=${diag.float32} detector=${diag.faceDetector} pose=${diag.poseDelegate}`);
+  if (forcedBackend) assert(diag.tfBackend === forcedBackend, `forced TensorFlow.js backend ${forcedBackend} is active`);
 
   const det = await waitFor(
     page,
@@ -242,12 +269,40 @@ try {
     rg.state.profiles = [{ id: 'x', name: 'Someone Else', heightCm: 175, hairLength: 'long', faceDescriptors: [Array.from({ length: 128 }, (_, i) => Math.sin(i) * 0.3)], samples: [] }];
     rg.state.settings.unknownGraceSec = 1;
   });
+  // Claude on (stubbed). With bestMatch "unknown" the alarm must still fire, and the visit gets a description.
+  await page.evaluate(() => {
+    const rg = window.roomGuard;
+    Object.assign(rg.state.settings, { aiEnabled: true, aiApiKey: 'sk-ant-test', aiModel: 'claude-opus-5', aiDescribeVisits: true, aiSecondOpinion: true });
+    rg.ai.configure({ apiKey: 'sk-ant-test' });
+    for (const p of rg.state.presence.values()) p.aiTried = false;
+  });
   await page.click('#btnArm');
-  const alarm = await waitFor(page, () => window.roomGuard.state.alarmActive, { label: 'alarm', timeout: 30000 });
+  const alarm = await waitFor(page, () => window.roomGuard.state.alarmActive, { label: 'alarm', timeout: 60000 });
   assert(alarm === true, 'alarm fired for an unknown person');
   assert(!(await page.$eval('#alarmBanner', (el) => el.classList.contains('hidden'))), 'alarm banner shown');
   await page.screenshot({ path: path.join(cache, 'live-alarm.png') });
   await page.click('#btnDismissAlarm');
+  assert(aiStub.calls >= 1, `Claude was consulted through the SDK bundle (${aiStub.calls} calls)`);
+  assert(aiStub.lastBody?.output_config?.format?.type === 'json_schema', 'request used structured JSON output');
+  assert(aiStub.lastBody?.fallbacks === 'default', 'opus-5 request carries server-side fallbacks');
+  assert(Array.isArray(aiStub.lastBody?.messages?.[0]?.content) && aiStub.lastBody.messages[0].content[0]?.type === 'image', 'request carried the frame as an image block');
+  const aiNote = await waitFor(page, () => {
+    const p = [...window.roomGuard.state.presence.values()][0];
+    return p?.ai?.summary || null;
+  }, { label: 'Claude description on the track', timeout: 30000 });
+  step(`Claude description: ${aiNote}`);
+
+  // Manual "Ask Claude" with a stub that matches the enrolled name: the camera's unknown becomes known via Claude.
+  aiStub.mode = 'match';
+  await waitFor(page, () => !document.getElementById('btnAskAi').disabled, { label: 'Ask Claude button enabled', timeout: 10000 });
+  await page.click('#btnAskAi');
+  const viaAi = await waitFor(page, () => {
+    const p = [...window.roomGuard.state.presence.values()][0];
+    return p?.aiIdentity ? p.aiIdentity.name : null;
+  }, { label: 'Claude second opinion applied', timeout: 30000 });
+  assert(viaAi === 'Someone Else', `second opinion identified the person (${viaAi})`);
+  await waitFor(page, () => document.getElementById('presence').textContent.includes('Claude'), { label: 'presence shows Claude identity', timeout: 15000 });
+  await page.screenshot({ path: path.join(cache, 'live-claude.png') });
 
   // Stop: events must be closed and the clip saved locally (IndexedDB).
   await page.click('#btnStop');
@@ -259,7 +314,7 @@ try {
     for (const e of list) {
       out.push({
         verdict: e.verdict, person: e.personName, alarm: e.alarmTriggered, clip: e.clipPath, snapshot: e.snapshotPath,
-        ended: !!e.endedAt, hair: e.features?.hair, faces: e.features?.faceDescriptors?.length,
+        ended: !!e.endedAt, hair: e.features?.hair, faces: e.features?.faceDescriptors?.length, aiSummary: e.features?.ai?.summary || null,
         clipUrl: e.clipPath ? await window.roomGuard.store.mediaUrl(e.clipPath) : null,
         snapUrl: e.snapshotPath ? await window.roomGuard.store.mediaUrl(e.snapshotPath) : null,
       });
@@ -272,6 +327,8 @@ try {
   assert(events.some((e) => e.alarm), 'an event records the alarm');
   assert(events.some((e) => e.clip && e.clipUrl), 'clip saved and retrievable');
   assert(events.some((e) => e.snapshot && e.snapUrl), 'snapshot saved and retrievable');
+  assert(events.some((e) => e.aiSummary), 'event stored the Claude description');
+  assert(events.some((e) => e.person === 'Someone Else' && e.verdict === 'known'), 'event closed with the identity Claude supplied');
 
   await page.click('#tabs button[data-view="events"]');
   await waitFor(page, () => document.querySelectorAll('#eventsList .event').length >= 1, { label: 'events rendered', timeout: 10000 });

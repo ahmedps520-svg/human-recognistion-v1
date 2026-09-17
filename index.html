@@ -49,6 +49,7 @@
             <button type="button" id="btnArm">Arm alarm</button>
             <button type="button" id="btnTestSiren">Test siren</button>
             <button type="button" id="btnSnapshot" disabled>Snapshot</button>
+            <button type="button" id="btnAskAi" class="hidden">Ask Claude</button>
             <span id="modelStatus" class="muted small">Models not loaded</span>
           </div>
         </div>
@@ -80,7 +81,10 @@
             <label>Height (cm) <input name="heightCm" type="number" min="40" max="250" step="0.5" placeholder="165"></label>
             <label>Weight (kg) <input name="weightKg" type="number" min="2" max="300" step="0.5" placeholder="60"></label>
           </div>
-          <label>Hair length <select name="hairLength" id="hairLengthSelect"></select></label>
+          <div class="row">
+            <label>Hair length <select name="hairLength" id="hairLengthSelect"></select></label>
+            <label>Age group <select name="ageGroup" id="ageGroupSelect"></select></label>
+          </div>
           <div class="row">
             <label>Colour <input name="color" type="color" value="#4ade80"></label>
             <label class="check"><input name="alertOnEnter" type="checkbox"> Notify me when this person enters</label>
@@ -201,7 +205,34 @@
               <select name="poseModelDelegate"><option value="GPU">GPU (faster)</option><option value="CPU">CPU</option></select>
             </label>
           </div>
-          <label class="check"><input type="checkbox" name="blockTelemetry"> Block the MediaPipe runtime's usage reports to Google (applies after reload)</label>
+          <div class="row">
+            <label>Face detector
+              <select name="faceDetector"><option value="ssd">SSD MobileNet (accurate, finds small faces)</option><option value="tiny">Tiny (lighter)</option></select>
+            </label>
+            <label>Face model runtime
+              <select name="tfBackend"><option value="auto">Auto (WASM on iPad/iPhone, WebGL elsewhere)</option><option value="wasm">WASM (exact maths)</option><option value="webgl">WebGL (GPU)</option><option value="cpu">CPU</option></select>
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" name="blockTelemetry"> Block the MediaPipe runtime's usage reports to Google</label>
+          <p class="muted small">Detector, runtime and telemetry changes apply after a page reload.</p>
+          <div id="diagnostics" class="stats muted">Diagnostics appear once the camera has started.</div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Claude vision assistant (optional)</legend>
+          <p class="muted small">Sends one still frame per visit to Claude to write a plain-language description and, when the camera is unsure, to judge which household member the visible attributes fit (age group, height, hair, build, clothing, notes). Claude never identifies people by their face. Frames go to Anthropic's API under your key; nothing is stored in this site.</p>
+          <label class="check"><input type="checkbox" name="aiEnabled"> Enable Claude</label>
+          <label>Anthropic API key <input name="aiApiKey" type="password" placeholder="sk-ant-…" autocomplete="off"></label>
+          <label>Model <select name="aiModel" id="aiModelSelect"></select></label>
+          <div class="row">
+            <label class="check"><input type="checkbox" name="aiDescribeVisits"> Describe every visit in the event log</label>
+            <label class="check"><input type="checkbox" name="aiSecondOpinion"> Ask Claude when the camera is unsure (delays the alarm until it answers)</label>
+          </div>
+          <label>Max calls per hour <input name="aiMaxPerHour" type="number" min="1" max="600" step="1"></label>
+          <div class="actions">
+            <button type="button" id="btnTestAi">Test with the current frame</button>
+            <span id="aiStatus" class="muted small"></span>
+          </div>
         </fieldset>
 
         <fieldset>

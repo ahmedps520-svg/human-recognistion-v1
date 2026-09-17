@@ -151,3 +151,9 @@ legend { padding: 0 .4rem; color: var(--text); font-weight: 600; }
 .photo-review label.face input { position: absolute; top: 4px; left: 4px; margin: 0; width: auto; }
 .photo-review label.face:has(input:checked) { border-color: var(--accent); }
 .card .thumbs figure { width: 40px; height: 40px; }
+
+.ai-note { font-size: .85rem; color: var(--text); background: var(--panel-2); border-left: 3px solid var(--accent-2); padding: .4rem .6rem; border-radius: 6px; margin-top: .4rem; }
+.ai-note .muted { display: block; margin-top: .2rem; }
+.person-now .actions { margin-top: .3rem; }
+.person-now .actions button { padding: .2rem .5rem; font-size: .8rem; }
+#diagnostics { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; }

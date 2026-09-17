@@ -46,6 +46,14 @@ export function blockMediaPipeTelemetry() {
   }
 }
 
+/** iPhone / iPad (including iPadOS, which reports itself as a Mac with touch). */
+export function isAppleMobile() {
+  if (typeof navigator === 'undefined') return false;
+  return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+const WASM_DIR = new URL('../../vendor/tfjs-wasm/', import.meta.url).href;
+
 export class VisionEngine {
   constructor({ assets = ASSETS, onStatus = () => {} } = {}) {
     this.assets = assets;
@@ -57,10 +65,13 @@ export class VisionEngine {
     this.lastPoseTs = -1;
     this.lastSegTs = -1;
     this.delegate = 'GPU';
-    this.faceOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 });
+    this.faceDetector = 'ssd';
+    this.tfBackend = null;
+    this.float32 = null;
+    this.faceOptions = null;
   }
 
-  async load({ delegate = 'GPU', numPoses = 3, blockTelemetry = true } = {}) {
+  async load({ delegate = 'GPU', numPoses = 3, blockTelemetry = true, faceDetector = 'ssd', tfBackend = 'auto' } = {}) {
     this.delegate = delegate;
     if (blockTelemetry) blockMediaPipeTelemetry();
     this.onStatus('Loading vision runtime…');
@@ -89,15 +100,66 @@ export class VisionEngine {
         }),
       delegate,
     );
+    this.onStatus('Preparing face runtime…');
+    await this._selectTfBackend(tfBackend);
     this.onStatus('Loading face models…');
+    this.faceDetector = faceDetector === 'tiny' ? 'tiny' : 'ssd';
+    const detectorNet = this.faceDetector === 'ssd' ? faceapi.nets.ssdMobilenetv1 : faceapi.nets.tinyFaceDetector;
     await Promise.all([
-      faceapi.nets.tinyFaceDetector.loadFromUri(this.assets.faceModels),
+      detectorNet.loadFromUri(this.assets.faceModels),
       faceapi.nets.faceLandmark68TinyNet.loadFromUri(this.assets.faceModels),
       faceapi.nets.faceRecognitionNet.loadFromUri(this.assets.faceModels),
     ]);
+    this.faceOptions =
+      this.faceDetector === 'ssd'
+        ? new faceapi.SsdMobilenetv1Options({ minConfidence: 0.4 })
+        : new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 });
     this.faceReady = true;
     this.loaded = true;
-    this.onStatus(`Models ready (${this.delegate})`);
+    this.onStatus(`Models ready (pose ${this.delegate}, face ${this.tfBackend}${this.float32 === false ? ' 16-bit' : ''})`);
+  }
+
+  /**
+   * Pick the TensorFlow.js backend for the face models. WebGL on iPhone/iPad
+   * can only render 16-bit floats, which visibly degrades the 128-d face
+   * embeddings, so Apple mobile devices default to the exact WASM backend.
+   */
+  async _selectTfBackend(pref = 'auto') {
+    const tf = faceapi.tf;
+    const want = pref === 'auto' ? (isAppleMobile() ? 'wasm' : 'webgl') : pref;
+    const attempt = async (name) => {
+      if (name === 'wasm') tf.setWasmPaths(WASM_DIR);
+      const ok = await tf.setBackend(name);
+      if (!ok) throw new Error(`backend ${name} unavailable`);
+      await tf.ready();
+      return name;
+    };
+    const order = [want, ...['webgl', 'wasm', 'cpu'].filter((n) => n !== want)];
+    for (const name of order) {
+      try {
+        await attempt(name);
+        break;
+      } catch (e) {
+        console.warn(`TensorFlow.js backend ${name} failed`, e);
+      }
+    }
+    this.tfBackend = tf.getBackend();
+    try {
+      this.float32 = this.tfBackend === 'webgl' ? !!tf.env().getBool('WEBGL_RENDER_FLOAT32_ENABLED') : true;
+    } catch {
+      this.float32 = null;
+    }
+  }
+
+  diagnostics() {
+    return {
+      poseDelegate: this.delegate,
+      faceDetector: this.faceDetector,
+      tfBackend: this.tfBackend,
+      float32: this.float32,
+      appleMobile: isAppleMobile(),
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+    };
   }
 
   async _create(factory, delegate) {
@@ -137,7 +199,7 @@ export class VisionEngine {
 
   /** Detect faces and compute 128-d descriptors. Boxes are in video pixel coordinates. */
   async detectFaces(input) {
-    if (!this.faceReady) return [];
+    if (!this.faceReady || !this.faceOptions) return [];
     const dets = await faceapi.detectAllFaces(input, this.faceOptions).withFaceLandmarks(true).withFaceDescriptors();
     return dets.map((d) => ({
       box: { x: d.detection.box.x, y: d.detection.box.y, w: d.detection.box.width, h: d.detection.box.height },

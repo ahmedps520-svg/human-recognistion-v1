@@ -55,7 +55,10 @@ your camera, your room and your family over time.
 - Event log with thumbnails, playback, "who was it?" confirmation (learning) and deletion.
 - Siren (Web Audio), browser notifications and a generic door-lock webhook.
 - Arm / disarm, configurable thresholds, backup export / import, clip downloads.
-- Works offline after the first load (models are cached by the browser).
+- Optional Claude vision assistant: a plain-language description of every
+  visit and an attribute-based second opinion when the camera is unsure.
+- Works offline after the first load (models are cached by the browser);
+  Claude is the only feature that needs the internet.
 
 ## Setup
 
@@ -173,12 +176,57 @@ vendor/                 pinned library bundles (see vendor/README.md)
 supabase/schema.sql     tables, RLS policies, storage bucket
 ```
 
+## Claude vision assistant (optional)
+
+Large language models are not face recognisers. Claude (like the other
+major hosted models) will not identify a real person from their face, and
+one frame every 200 ms through an API would be slow and expensive anyway.
+So the local models stay in charge of recognition, and Claude is used for
+what it is good at:
+
+- **Describing each visit** in one or two plain sentences that are stored
+  with the event ("An adult with shoulder-length dark hair in a grey hoodie
+  came in and sat at the desk").
+- **A second opinion when the camera is unsure.** Claude gets one still
+  frame plus the household roster described by non-facial attributes (age
+  group, height, hair length, weight, notes) and says whose attributes fit
+  best, with a confidence. A confident match (≥ 70 %) upgrades an "unknown"
+  or "ambiguous" visit to that person and holds the alarm; "unknown" lets
+  the alarm proceed. The prompt tells Claude not to use faces.
+
+Turn it on under **Settings → Claude vision assistant** with your own
+Anthropic API key. The key is stored only in your browser; frames are sent
+to Anthropic's API under your account (see their data policies). Costs are
+per visit, not per frame: roughly one to two cents per visit on Claude Opus
+5, a fraction of that on Haiku 4.5. A per-hour cap protects against a busy
+day. Add an age group to each person on the People tab, and put anything
+distinctive in their notes (glasses, usual clothes, typical times), because
+that is what Claude matches on.
+
+## Running it on an iPad
+
+An iPad Pro runs the whole pipeline in Safari. Two things matter:
+
+- **Face runtime.** Safari's WebGL on iPhone and iPad can only render
+  16-bit floats, which visibly degrades the 128-number face embeddings and
+  makes people look alike to the matcher. The app therefore runs the face
+  models on the exact WASM runtime on Apple mobile devices (Settings →
+  Performance → Face model runtime, default *Auto*). The Diagnostics box
+  there shows which runtime is active.
+- **Keep the tab awake.** The app requests a screen wake lock while the
+  camera runs, but iPadOS still pauses the camera when the tab is in the
+  background or the iPad is locked. Use Guided Access or keep the tab in
+  front.
+
 ## Limitations
 
 - **Height is approximate.** Expect roughly ± 5 cm after a good calibration,
   worse near the edges of the calibrated floor area, and nothing at all when
   the feet are hidden or the person is sitting or crouching. Two family
   members within a few centimetres of each other need face samples to be told apart.
+- **Claude is a helper, not the recogniser.** It only sees attributes, so
+  two adults with similar height and hair are still ambiguous to it; face
+  samples on the People tab are what make matches certain.
 - **Weight cannot be measured optically.** "Build" separates a slim adult
   from a heavy one but not 60 kg from 65 kg.
 - **Hair** is measured from a 256×256 mask; hats, hoods and buns confuse it.
@@ -201,6 +249,7 @@ need. Face descriptors are stored as numbers that cannot be turned back into
 a photo, but snapshots and clips can.
 
 Everything is computed on your device. The only outbound traffic is to your
-Supabase project, your own door-lock webhook, and the model/library CDNs on
-first load. The MediaPipe runtime would also post anonymous usage reports to
+Supabase project, your own door-lock webhook, the model/library CDNs on
+first load, and (only if you enable it) one frame per visit to Anthropic's
+API for the Claude assistant. The MediaPipe runtime would also post anonymous usage reports to
 Google; the app blocks those by default (Settings → Performance).
