@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Room Guard</title>
+  <meta name="description" content="Bedroom camera that recognises household members by height, build, hair length and face, records clips and raises an alarm for strangers.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%8F%EF%B8%8F%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">🛏️ Room Guard <span class="version" id="appVersion"></span></div>
+    <nav class="tabs" id="tabs" aria-label="Sections">
+      <button type="button" data-view="live" class="active">Live</button>
+      <button type="button" data-view="people">People</button>
+      <button type="button" data-view="events">Events</button>
+      <button type="button" data-view="calibrate">Calibrate</button>
+      <button type="button" data-view="settings">Settings</button>
+    </nav>
+    <div class="status-pill" id="storeStatus" title="Where clips and events are stored">Local mode</div>
+  </header>
+
+  <main>
+    <!-- ===================== LIVE ===================== -->
+    <section id="view-live" class="view active">
+      <div class="live-grid">
+        <div class="stage">
+          <div class="video-wrap" id="videoWrap">
+            <video id="video" playsinline muted autoplay></video>
+            <canvas id="overlay"></canvas>
+            <div class="stage-badges">
+              <span id="recBadge" class="badge rec hidden">● REC</span>
+              <span id="fpsBadge" class="badge">– fps</span>
+              <span id="armedBadge" class="badge">Disarmed</span>
+            </div>
+            <div id="alarmBanner" class="alarm-banner hidden" role="alert">
+              <strong>⚠️ Unknown person in the room</strong>
+              <button type="button" id="btnDismissAlarm">Dismiss</button>
+            </div>
+            <div id="stagePlaceholder" class="stage-placeholder">
+              <p>Camera is off.</p>
+              <p class="muted small">Press <b>Start camera</b>. The first start downloads about 30 MB of models.</p>
+            </div>
+          </div>
+          <div class="controls">
+            <button type="button" id="btnStart" class="primary">Start camera</button>
+            <button type="button" id="btnStop" disabled>Stop</button>
+            <button type="button" id="btnArm">Arm alarm</button>
+            <button type="button" id="btnTestSiren">Test siren</button>
+            <button type="button" id="btnSnapshot" disabled>Snapshot</button>
+            <span id="modelStatus" class="muted small">Models not loaded</span>
+          </div>
+        </div>
+        <aside class="panel">
+          <h2>In the room now</h2>
+          <div id="presence" class="presence"><p class="muted">Nobody detected.</p></div>
+          <h2>Activity</h2>
+          <ul id="liveLog" class="log"></ul>
+        </aside>
+      </div>
+    </section>
+
+    <!-- ===================== PEOPLE ===================== -->
+    <section id="view-people" class="view">
+      <div class="two-col">
+        <div>
+          <div class="section-head">
+            <h2>People</h2>
+            <button type="button" id="btnNewPerson" class="primary">Add person</button>
+          </div>
+          <p class="muted">Enroll everyone who is allowed in the room. Height and hair length identify people from behind or far away; face samples make the match certain. Anyone who does not match well enough is treated as unknown.</p>
+          <div id="peopleList" class="cards"></div>
+        </div>
+        <form id="personForm" class="panel form hidden" autocomplete="off">
+          <h2 id="personFormTitle">Add a person</h2>
+          <input type="hidden" name="personId">
+          <label>Name <input name="name" required placeholder="Mom" maxlength="40"></label>
+          <div class="row">
+            <label>Height (cm) <input name="heightCm" type="number" min="40" max="250" step="0.5" placeholder="165"></label>
+            <label>Weight (kg) <input name="weightKg" type="number" min="2" max="300" step="0.5" placeholder="60"></label>
+          </div>
+          <label>Hair length <select name="hairLength" id="hairLengthSelect"></select></label>
+          <div class="row">
+            <label>Colour <input name="color" type="color" value="#4ade80"></label>
+            <label class="check"><input name="alertOnEnter" type="checkbox"> Notify me when this person enters</label>
+          </div>
+          <label>Notes <textarea name="notes" rows="2" placeholder="Usually wears glasses, comes in around 7pm…"></textarea></label>
+          <div class="capture">
+            <div class="counts">
+              <span>Face samples: <b id="faceCount">0</b></span>
+              <span>Body samples: <b id="bodyCount">0</b></span>
+            </div>
+            <div class="actions">
+              <button type="button" id="btnCaptureFace">Capture 5 face samples</button>
+              <button type="button" id="btnCaptureBody">Capture body sample</button>
+              <button type="button" id="btnClearSamples" class="danger-outline">Clear samples</button>
+            </div>
+            <p id="captureHint" class="muted small">Start the camera on the Live tab first, then have this person stand in front of it.</p>
+          </div>
+          <div class="actions">
+            <button type="submit" class="primary">Save person</button>
+            <button type="button" id="btnCancelPerson">Cancel</button>
+          </div>
+        </form>
+      </div>
+    </section>
+
+    <!-- ===================== EVENTS ===================== -->
+    <section id="view-events" class="view">
+      <div class="section-head">
+        <h2>Events</h2>
+        <button type="button" id="btnRefreshEvents">Refresh</button>
+      </div>
+      <p class="muted">Every visit is logged with a snapshot and clip. Confirming who it really was teaches the identifier: the measured height, build, hair and face samples are added to that person.</p>
+      <div id="eventsList" class="events"></div>
+    </section>
+
+    <!-- ===================== CALIBRATE ===================== -->
+    <section id="view-calibrate" class="view">
+      <div class="two-col">
+        <div class="panel form">
+          <h2>Height calibration</h2>
+          <p class="muted">The camera cannot know real sizes on its own. Pick one person whose height you know, start collecting, and have them walk slowly around the whole room facing the camera, with their feet visible. Thirty seconds is plenty. Redo this if you move the camera.</p>
+          <label>Reference person
+            <select id="calibPerson"></select>
+          </label>
+          <label>Reference height (cm) <input id="calibHeight" type="number" min="40" max="250" step="0.5"></label>
+          <div class="actions">
+            <button type="button" id="btnCalibStart" class="primary">Start collecting</button>
+            <button type="button" id="btnCalibStop" disabled>Stop</button>
+            <button type="button" id="btnCalibSave" disabled>Save calibration</button>
+            <button type="button" id="btnCalibClear" class="danger-outline">Delete calibration</button>
+          </div>
+          <div id="calibStats" class="stats muted">Not collecting.</div>
+        </div>
+        <div class="panel">
+          <h2>Current calibration</h2>
+          <div id="calibCurrent" class="muted">No calibration yet. Height will not be estimated until you calibrate.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== SETTINGS ===================== -->
+    <section id="view-settings" class="view">
+      <form id="settingsForm" class="form settings" autocomplete="off">
+        <fieldset>
+          <legend>Camera</legend>
+          <label>Camera <select name="cameraDeviceId" id="cameraSelect"><option value="">Default camera</option></select></label>
+          <label class="check"><input type="checkbox" name="mirror"> Mirror the preview</label>
+          <label class="check"><input type="checkbox" name="recordAudio"> Record audio in clips</label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Supabase (cloud storage for clips, events and people)</legend>
+          <p class="muted small">Leave empty to keep everything in this browser only. See <code>supabase/schema.sql</code> for the tables to create.</p>
+          <label>Project URL <input name="supabaseUrl" type="url" placeholder="https://xxxx.supabase.co"></label>
+          <label>Anon (public) key <input name="supabaseAnonKey" type="password" placeholder="eyJ…"></label>
+          <div class="row">
+            <label>Email <input name="supabaseEmail" type="email" placeholder="you@example.com"></label>
+            <label>Password <input id="supabasePassword" type="password" placeholder="••••••••"></label>
+          </div>
+          <div class="actions">
+            <button type="button" id="btnSignIn">Save &amp; sign in</button>
+            <button type="button" id="btnSignOut">Sign out</button>
+            <span id="connStatus" class="muted small"></span>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Identification</legend>
+          <div class="row">
+            <label>Match threshold <input name="matchThreshold" type="number" min="0.3" max="0.95" step="0.01"></label>
+            <label>Margin over runner-up <input name="matchMargin" type="number" min="0" max="0.5" step="0.01"></label>
+            <label>Seconds unknown before alarm <input name="unknownGraceSec" type="number" min="0" max="60" step="0.5"></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Recording</legend>
+          <label class="check"><input type="checkbox" name="recordClips"> Record a clip whenever someone is in the room</label>
+          <div class="row">
+            <label>Max clip length (s) <input name="clipMaxSec" type="number" min="5" max="600" step="1"></label>
+            <label>Keep recording after room empties (s) <input name="clipTailSec" type="number" min="0" max="60" step="1"></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Alarm, notifications and door lock</legend>
+          <label class="check"><input type="checkbox" name="alarmEnabled"> Sound the siren for unknown people (when armed)</label>
+          <label>Siren duration (s) <input name="alarmDurationSec" type="number" min="1" max="300" step="1"></label>
+          <label class="check"><input type="checkbox" name="notifyEnabled"> Browser notifications <button type="button" id="btnRequestNotify" class="inline">Allow</button></label>
+          <label>Door-lock webhook URL <input name="lockWebhookUrl" type="url" placeholder="https://your-home-assistant/api/webhook/lock-door"></label>
+          <label>Webhook bearer token (optional) <input name="lockWebhookToken" type="password"></label>
+          <label class="check"><input type="checkbox" name="lockOnUnknown"> Lock the door when the alarm fires</label>
+          <div class="actions"><button type="button" id="btnTestLock">Send test lock request</button></div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Performance</legend>
+          <div class="row">
+            <label>Face check interval (ms) <input name="faceEveryMs" type="number" min="100" max="5000" step="50"></label>
+            <label>Hair check every N frames <input name="hairEveryFrames" type="number" min="1" max="30" step="1"></label>
+            <label>Pose model runs on
+              <select name="poseModelDelegate"><option value="GPU">GPU (faster)</option><option value="CPU">CPU</option></select>
+            </label>
+          </div>
+          <label class="check"><input type="checkbox" name="blockTelemetry"> Block the MediaPipe runtime's usage reports to Google (applies after reload)</label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Data</legend>
+          <div class="actions">
+            <button type="button" id="btnExport">Export local data</button>
+            <label class="file-btn">Import local data <input type="file" id="importFile" accept="application/json" hidden></label>
+            <button type="button" id="btnWipe" class="danger-outline">Wipe everything stored in this browser</button>
+          </div>
+        </fieldset>
+
+        <div class="actions sticky">
+          <button type="submit" class="primary">Save settings</button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <script src="vendor/supabase-js-2.116.0.umd.js"></script>
+  <script type="module" src="assets/js/app.js"></script>
+</body>
+</html>

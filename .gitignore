@@ -1,0 +1,4 @@
+node_modules
+tests/e2e/.cache/
+*.log
+.DS_Store
