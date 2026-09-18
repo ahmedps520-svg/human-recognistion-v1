@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Home Dashboard</title>
+  <meta name="description" content="One screen for the room camera, its visit log, the Minecraft server, the air conditioning, the door switch and the Govee lights.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%A0%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <link rel="stylesheet" href="assets/css/dashboard.css">
+</head>
+<body class="dash">
+  <header class="topbar">
+    <div class="brand">🏠 Home <span class="version" id="dashVersion"></span></div>
+    <div class="spacer"></div>
+    <span id="clock" class="muted small"></span>
+    <button type="button" id="btnRefresh" title="Refresh everything">⟳</button>
+    <div class="status-pill" id="connPill">Not connected</div>
+    <button type="button" id="btnConn">Connect</button>
+  </header>
+
+  <main class="tiles">
+    <!-- Camera -->
+    <section class="tile tile-camera" id="tileCamera">
+      <div class="tile-head">
+        <h2>Bedroom camera</h2>
+        <div class="badges">
+          <span class="badge" id="camPeople">–</span>
+          <span class="badge" id="camArmed">–</span>
+          <span class="badge rec hidden" id="camRec">● REC</span>
+        </div>
+      </div>
+      <div class="cam-wrap">
+        <img id="camStream" alt="Live camera" hidden>
+        <div id="camOffline" class="cam-offline">
+          <p>No live feed.</p>
+          <p class="muted small">Open the camera app on the iPad, set the home server in its Settings, and start the camera.</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" id="btnArm" class="primary">Arm alarm</button>
+        <button type="button" id="btnDisarm">Disarm</button>
+        <a id="lnkSnapshot" class="button" href="#" target="_blank" rel="noopener">Snapshot</a>
+        <a id="lnkCameraApp" class="button" href="index.html" target="_blank" rel="noopener">Open camera app</a>
+      </div>
+      <div id="camMeta" class="muted small"></div>
+    </section>
+
+    <!-- Visits -->
+    <section class="tile tile-visits" id="tileVisits">
+      <div class="tile-head">
+        <h2>Visits <span id="visitsToday" class="muted small"></span></h2>
+        <a class="button small-btn" href="index.html#events" target="_blank" rel="noopener">All</a>
+      </div>
+      <ul id="visitList" class="visits"><li class="muted">No visits yet.</li></ul>
+    </section>
+
+    <!-- Minecraft -->
+    <section class="tile" id="tileMinecraft">
+      <div class="tile-head">
+        <h2>Minecraft server</h2>
+        <span class="badge" id="mcState">–</span>
+      </div>
+      <div class="kv" id="mcInfo"></div>
+      <div class="actions">
+        <button type="button" data-mc="start" class="primary">Start</button>
+        <button type="button" data-mc="stop">Stop</button>
+        <button type="button" data-mc="restart">Restart</button>
+      </div>
+      <form id="rconForm" class="rcon">
+        <input id="rconInput" placeholder="RCON command, e.g. list · say hello · whitelist add Name" autocomplete="off">
+        <button type="submit">Run</button>
+      </form>
+      <pre id="rconOut" class="rcon-out muted"></pre>
+    </section>
+
+    <!-- Air conditioning -->
+    <section class="tile" id="tileAc">
+      <div class="tile-head">
+        <h2>Air conditioning</h2>
+        <span class="badge" id="acState">–</span>
+      </div>
+      <div class="ac-main">
+        <div class="ac-temp">
+          <button type="button" id="acDown" class="round">−</button>
+          <div class="ac-target"><span id="acTarget">–</span><small>°C target</small></div>
+          <button type="button" id="acUp" class="round">+</button>
+        </div>
+        <div class="muted small" id="acNow"></div>
+      </div>
+      <div class="actions">
+        <button type="button" id="acPower" class="primary">Turn on</button>
+        <div class="seg" id="acModes">
+          <button type="button" data-mode="cool">Cool</button>
+          <button type="button" data-mode="heat">Heat</button>
+          <button type="button" data-mode="fan">Fan</button>
+          <button type="button" data-mode="dry">Dry</button>
+          <button type="button" data-mode="auto">Auto</button>
+        </div>
+        <select id="acFan" title="Fan level">
+          <option value="auto">Fan auto</option>
+          <option value="low">Fan low</option>
+          <option value="medium">Fan medium</option>
+          <option value="high">Fan high</option>
+        </select>
+      </div>
+      <div class="muted small" id="acNote"></div>
+    </section>
+
+    <!-- Door -->
+    <section class="tile" id="tileDoor">
+      <div class="tile-head">
+        <h2>Door</h2>
+        <span class="badge" id="doorState">–</span>
+      </div>
+      <div class="door-big" id="doorIcon">🚪</div>
+      <div class="actions">
+        <button type="button" data-door="open" class="primary">Open / unlock</button>
+        <button type="button" data-door="close">Close / lock</button>
+        <button type="button" data-door="toggle">Toggle</button>
+      </div>
+      <div class="muted small" id="doorNote"></div>
+    </section>
+
+    <!-- Lights -->
+    <section class="tile tile-lights" id="tileLights">
+      <div class="tile-head">
+        <h2>Lights</h2>
+        <div class="actions">
+          <button type="button" data-all="on">All on</button>
+          <button type="button" data-all="off">All off</button>
+        </div>
+      </div>
+      <div id="lightList" class="lights"><p class="muted">No lights found.</p></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden" role="status"></div>
+
+  <!-- connection settings -->
+  <dialog id="connDialog">
+    <form id="connForm" method="dialog" class="form">
+      <h2>Home server</h2>
+      <p class="muted small">The dashboard talks to the home server's API. When this page is served by the server itself the URL is filled in for you; the token is printed when the server starts (and stored in <code>server/config.json</code>).</p>
+      <label>Server URL <input name="serverUrl" placeholder="http://192.168.1.20:8787" autocomplete="off"></label>
+      <label>Token <input name="token" type="password" autocomplete="off"></label>
+      <label>Camera app URL (for the "Open camera app" button) <input name="cameraUrl" placeholder="https://you.github.io/human-recognistion-v1/" autocomplete="off"></label>
+      <div class="actions">
+        <button type="submit" class="primary">Save &amp; connect</button>
+        <button type="button" id="btnConnCancel">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="assets/js/dashboard.js"></script>
+</body>
+</html>

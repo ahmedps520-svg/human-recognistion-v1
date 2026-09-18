@@ -1,0 +1,6 @@
+{
+  "port": 8787,
+  "token": "demo-token-change-me",
+  "mock": true,
+  "dataDir": "./data-mock"
+}

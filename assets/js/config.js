@@ -81,6 +81,11 @@ export const DEFAULT_SETTINGS = {
   // 'presence': detect people, record each visit from entering to leaving, alarm when armed.
   // 'identify': additionally recognise who it is (enrollment, calibration, face models).
   mode: 'presence',
+  // Home server (server/): receives the live feed and visit log, relays dashboard commands
+  serverUrl: '',
+  serverToken: '',
+  serverPushFrames: true,
+  serverFrameMs: 500,
   supabaseUrl: '',
   supabaseAnonKey: '',
   supabaseEmail: '',

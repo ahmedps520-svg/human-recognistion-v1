@@ -16,6 +16,7 @@ always on and physical.
 - [x] Enrollment preview with readiness indicators, face thumbnails, album photo import.
 - [x] iPad support: exact WASM face runtime on Apple mobile devices, SSD face detector, screen wake lock, diagnostics.
 - [x] Claude vision assistant: per-visit descriptions and attribute-based second opinions (never face recognition).
+- [x] Home server (Node, no dependencies) with dashboard: live feed, visits, Minecraft, AC, door, Govee lights, remote arm/disarm.
 - [x] "Record every visit" as the default mode: pose-only detection, visit events with entered/left times, multi-part clips; identification is the optional advanced mode.
 - [ ] Field test with the whole family for two weeks; tune weights and sigmas from confirmed events.
 

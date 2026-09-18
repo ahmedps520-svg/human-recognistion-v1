@@ -72,6 +72,8 @@ your camera, your room and your family over time.
 - Arm / disarm, configurable thresholds, backup export / import, clip downloads.
 - Optional Claude vision assistant: a plain-language description of every
   visit and an attribute-based second opinion when the camera is unsure.
+- Optional home server + dashboard: live feed, visit log, Minecraft server,
+  AC, door switch and Govee lights in one place, with remote arm/disarm.
 - Works offline after the first load (models are cached by the browser);
   Claude is the only feature that needs the internet.
 
@@ -166,10 +168,12 @@ just not needed yet. When you want clips and events off the laptop:
 ## Development
 
 ```
-npm install         # playwright + pinned browser libraries (already vendored)
-npm test            # unit tests for feature extraction, calibration and identification
-npm run test:e2e    # headless Chromium: fake camera with a photo, enrollment, alarm, events
-npm run serve       # local static server on :8080
+npm install                 # playwright + pinned browser libraries (already vendored)
+npm test                    # unit tests (camera logic) + home server API tests
+npm run test:e2e            # headless Chromium: fake camera with a photo, both modes
+npm run test:e2e:dashboard  # dashboard against the mock home server
+npm run serve               # local static server on :8080
+npm run server              # home server on :8787 (see server/README.md)
 ```
 
 The end-to-end test downloads the MediaPipe models once into
@@ -191,7 +195,22 @@ assets/js/alarm.js      siren, notifications, door-lock webhook
 assets/js/app.js        UI and orchestration
 vendor/                 pinned library bundles (see vendor/README.md)
 supabase/schema.sql     tables, RLS policies, storage bucket
+dashboard.html          home dashboard (assets/js/dashboard.js)
+server/                 home server: API, device adapters, mock mode, tests
 ```
+
+## Home server and dashboard (optional)
+
+`server/` is a dependency-free Node.js process for a computer at home. It
+receives the camera's live feed and visit log, stores clips on disk, and
+serves a **dashboard** (`dashboard.html`) that puts the live feed, the
+visits, the **Minecraft server** (status, players, start/stop/restart, RCON
+console), the **air conditioning** (Sensibo, Home Assistant or webhooks),
+the **door switch** (Shelly, Tasmota, Home Assistant or webhooks) and the
+**Govee lights** (cloud API) on one screen. The dashboard can also arm and
+disarm the camera remotely. `npm run server:mock` starts it with simulated
+devices so you can try the dashboard immediately. Setup, remote access
+(Tailscale) and the API are described in [server/README.md](server/README.md).
 
 ## Claude vision assistant (optional)
 

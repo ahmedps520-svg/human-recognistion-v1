@@ -248,13 +248,29 @@
 
         <fieldset>
           <legend>Browser storage</legend>
-          <p class="muted small">People, events and settings live in this browser's local storage; clips and snapshots in its IndexedDB. Nothing leaves your computer. Clearing site data or switching browsers starts from scratch, so export a backup now and then. Clips are downloaded one by one from the Events tab.</p>
+          <p class="muted small">People, events and settings live in this browser's local storage; clips and snapshots in its IndexedDB. Nothing leaves your computer unless you configure the home server or Supabase below. Clearing site data or switching browsers starts from scratch, so export a backup now and then. Clips are downloaded one by one from the Events tab.</p>
           <div id="storageUsage" class="muted small">Storage usage: …</div>
           <div class="actions">
             <button type="button" id="btnPersist">Ask the browser to keep this data</button>
             <button type="button" id="btnExport">Export backup (people, events, settings)</button>
             <label class="file-btn">Import backup <input type="file" id="importFile" accept="application/json" hidden></label>
             <button type="button" id="btnWipe" class="danger-outline">Wipe everything stored in this browser</button>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Home server (optional)</legend>
+          <p class="muted small">Run <code>npm run server</code> on a computer at home (see <code>server/README.md</code>). The camera then sends its live feed and visit log there, the dashboard can arm and disarm it remotely, and the door lock can go through the server. This page is served over HTTPS, so the server must be reachable over HTTPS as well; Tailscale makes that a one-liner.</p>
+          <label>Server URL <input name="serverUrl" type="url" placeholder="https://homeserver.tailnet.ts.net" autocomplete="off"></label>
+          <label>Token <input name="serverToken" type="password" autocomplete="off"></label>
+          <div class="row">
+            <label class="check"><input type="checkbox" name="serverPushFrames"> Send the live feed to the server</label>
+            <label>Frame interval (ms) <input name="serverFrameMs" type="number" min="200" max="5000" step="50"></label>
+          </div>
+          <div class="actions">
+            <button type="button" id="btnTestServer">Test connection</button>
+            <button type="button" id="btnUseServerLock">Use the server for the door lock</button>
+            <span id="serverStatus" class="muted small"></span>
           </div>
         </fieldset>
 

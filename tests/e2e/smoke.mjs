@@ -10,8 +10,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
 import { chromium } from 'playwright';
 import { startServer, MIME } from './serve.mjs';
+import { createServer as createHomeServer } from '../../server/index.js';
+import { loadConfig as loadHomeConfig } from '../../server/lib/config.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -84,7 +87,7 @@ const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(String(e)));
 const externalRequests = [];
 page.on('request', (r) => {
-  if (!r.url().startsWith(url) && !/cdn\.jsdelivr\.net|storage\.googleapis\.com\/mediapipe-models|api\.anthropic\.com/.test(r.url())) externalRequests.push(r.url());
+  if (!r.url().startsWith(url) && !(home && r.url().startsWith(home.base)) && !/cdn\.jsdelivr\.net|storage\.googleapis\.com\/mediapipe-models|api\.anthropic\.com/.test(r.url())) externalRequests.push(r.url());
 });
 page.on('requestfailed', (r) => console.log(`  request failed: ${r.url().slice(0, 160)} (${r.failure()?.errorText})`));
 page.on('console', (m) => {
@@ -111,11 +114,24 @@ const scenario = process.env.E2E_SCENARIO || 'all';
 // Optional: force the face-model runtime (E2E_TF_BACKEND=wasm exercises the vendored WASM binaries).
 const forcedBackend = process.env.E2E_TF_BACKEND || '';
 const initialMode = scenario === 'identify' ? 'identify' : 'presence';
-await page.addInitScript(({ backend, mode }) => {
+// Optional home server (E2E_SERVER=1): the presence scenario then stores visits there and pushes frames.
+let home = null;
+if (process.env.E2E_SERVER) {
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rg-home-'));
+  const app = createHomeServer(loadHomeConfig({ port: 0, host: '127.0.0.1', token: 'e2e-home-token', mock: true, dataDir }));
+  const a = await app.listen();
+  home = { app, dataDir, base: `http://127.0.0.1:${a.port}`, token: 'e2e-home-token' };
+  home.api = async (p, init = {}) => {
+    const r = await fetch(`${home.base}${p}`, { ...init, headers: { Authorization: `Bearer ${home.token}`, ...(init.headers || {}) } });
+    return { status: r.status, json: await r.json().catch(() => null), headers: r.headers };
+  };
+  step(`home server (mock devices) at ${home.base}`);
+}
+await page.addInitScript(({ backend, mode, server }) => {
   if (!localStorage.getItem('hr.settings.v1')) {
-    localStorage.setItem('hr.settings.v1', JSON.stringify({ ...(backend ? { tfBackend: backend } : {}), mode }));
+    localStorage.setItem('hr.settings.v1', JSON.stringify({ ...(backend ? { tfBackend: backend } : {}), mode, ...(server ? { serverUrl: server.base, serverToken: server.token } : {}) }));
   }
-}, { backend: forcedBackend, mode: initialMode });
+}, { backend: forcedBackend, mode: initialMode, server: home ? { base: home.base, token: home.token } : null });
 
 // Stubbed Anthropic API: the app talks to it through the vendored SDK bundle.
 let aiStub = { mode: 'unknown', calls: 0, lastBody: null };
@@ -190,7 +206,18 @@ async function presenceScenario() {
   assert((await page.textContent('#alarmText')).includes('Someone is in the room'), 'alarm text is about presence, not identity');
   await page.screenshot({ path: path.join(cache, 'presence-alarm.png') });
   await page.click('#btnDismissAlarm');
-  await page.click('#btnArm'); // disarm again so later scenarios start disarmed
+  if (home) {
+    assert((await page.textContent('#storeStatus')).includes('Home server'), 'status pill shows the home server');
+    await home.api('/api/camera/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'disarm' }) });
+    await waitFor(page, () => !window.roomGuard.state.armed, { label: 'remote disarm applied in the camera tab', timeout: 15000 });
+    step('dashboard command reached the camera tab');
+    const frame = await fetch(`${home.base}/api/camera/frame.jpg?token=${home.token}`);
+    assert(frame.status === 200 && frame.headers.get('content-type') === 'image/jpeg', 'live frames reached the home server');
+    const st = (await home.api('/api/camera/status')).json;
+    assert(st.online && st.presence.people === 1, `home server sees the person (people=${st.presence.people})`);
+  } else {
+    await page.click('#btnArm'); // disarm again so later scenarios start disarmed
+  }
 
   await page.click('#btnStop');
   await waitFor(page, () => !window.roomGuard.state.running, { label: 'camera stopped', timeout: 20000 });
@@ -208,6 +235,15 @@ async function presenceScenario() {
   const card = await page.evaluate(() => document.querySelector('#eventsList .event').textContent);
   assert(card.includes('Visit') && !card.includes('Who was it?'), 'visit card has no identification controls');
   await page.screenshot({ path: path.join(cache, 'presence-events.png'), fullPage: true });
+  if (home) {
+    const stored = (await home.api('/api/camera/events')).json;
+    assert(stored.length >= 1 && stored[0].verdict === 'person' && stored[0].endedAt, 'visit stored on the home server');
+    assert(stored[0].clipPath && stored[0].snapshotPath, 'clip and snapshot paths recorded on the server');
+    const clip = await fetch(`${home.base}/api/camera/media/${stored[0].clipPath}?token=${home.token}`);
+    assert(clip.status === 200 && Number(clip.headers.get('content-length')) > 1000, 'clip file is on the server');
+    const after = (await home.api('/api/camera/status')).json;
+    assert(after.presence.people === 0, 'presence cleared on the server after stop');
+  }
 }
 
 async function identifyScenario() {
@@ -409,5 +445,9 @@ try {
   }
   await browser.close();
   server.close();
+  if (home) {
+    await home.app.close();
+    fs.rmSync(home.dataDir, { recursive: true, force: true });
+  }
 }
 console.log(process.exitCode ? 'E2E FAILED' : 'E2E PASSED');

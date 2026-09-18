@@ -2,3 +2,6 @@ node_modules
 tests/e2e/.cache/
 *.log
 .DS_Store
+server/config.json
+server/data/
+server/data-mock/

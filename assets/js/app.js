@@ -60,6 +60,8 @@ const state = {
   enrollPreviewRaf: 0,
   photoCandidates: null,
   wakeLock: null,
+  serverEs: null,
+  serverOk: null,
   calib: { collecting: false, samples: [], refHeight: null, fit: null, reason: '' },
   view: 'live',
 };
@@ -153,7 +155,10 @@ function colorFor(identity) {
 
 function updateStoreStatus() {
   const el = els.storeStatus;
-  if (!store.remote) {
+  if (store.isServer) {
+    el.textContent = state.serverOk === false ? 'Home server · unreachable' : 'Home server';
+    el.className = `status-pill ${state.serverOk === false ? 'warn' : 'ok'}`;
+  } else if (!store.remote) {
     el.textContent = 'Browser storage';
     el.className = 'status-pill';
   } else if (store.user) {
@@ -267,7 +272,7 @@ async function startCamera() {
     state.running = true;
     els.btnStop.disabled = false;
     els.btnSnapshot.disabled = false;
-    if (!store.remote) requestPersistentStorage({ quiet: true });
+    if (store.mode === 'local') requestPersistentStorage({ quiet: true });
     requestWakeLock();
     log('Camera started');
     requestAnimationFrame(loop);
@@ -345,6 +350,7 @@ async function stopCamera() {
   await finalizeRecording();
   releaseWakeLock();
   stopStream();
+  pushPresence({ people: 0, armed: state.armed, recording: false, mode: state.settings.mode, tracks: [] });
   const ctx = els.overlay.getContext('2d');
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
   els.stagePlaceholder.classList.remove('hidden');
@@ -440,6 +446,7 @@ function processFrame(now) {
   handlePresence(active, ended, now);
   draw(detections, active, W, H);
   renderPresence(active);
+  maybePushFrame(now, active);
 
   state.fps.count += 1;
   if (now - state.fps.since > 1000) {
@@ -456,6 +463,132 @@ function processFrame(now) {
 function ema(key, ms) {
   const t = state.timing;
   t[key] = t[key] ? t[key] * 0.8 + ms * 0.2 : ms;
+}
+
+// ---------------------------------------------------------------- home server link
+const serverConfigured = () => !!(state.settings.serverUrl && state.settings.serverToken);
+const serverBase = () => state.settings.serverUrl.trim().replace(/\/$/, '');
+let framePushAt = 0;
+let framePushBusy = false;
+
+function presenceMeta(tracks) {
+  return {
+    people: tracks.length,
+    armed: state.armed,
+    recording: !!state.session,
+    mode: state.settings.mode,
+    tracks: tracks.map((tr) => ({ id: tr.id, label: labelFor(effectiveIdentity(tr)), since: Math.round((tr.lastSeen - tr.firstSeen) / 1000) })),
+  };
+}
+
+async function maybePushFrame(now, tracks) {
+  const s = state.settings;
+  if (!serverConfigured() || !s.serverPushFrames || framePushBusy || now - framePushAt < (s.serverFrameMs || 500)) return;
+  framePushBusy = true;
+  framePushAt = now;
+  try {
+    const snap = await captureSnapshot(els.video, { maxWidth: 640, quality: 0.6 });
+    if (!snap?.blob) return;
+    const res = await fetch(`${serverBase()}/api/camera/frame?meta=${encodeURIComponent(JSON.stringify(presenceMeta(tracks)))}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${s.serverToken}`, 'Content-Type': 'image/jpeg' },
+      body: snap.blob,
+    });
+    if (!res.ok) throw new Error(`server responded ${res.status}`);
+    if (state.serverOk !== true) {
+      state.serverOk = true;
+      updateStoreStatus();
+    }
+  } catch (e) {
+    if (state.serverOk !== false) {
+      log(`Home server: ${e.message}`, 'error');
+      state.serverOk = false;
+      updateStoreStatus();
+    }
+  } finally {
+    framePushBusy = false;
+  }
+}
+
+function pushPresence(meta) {
+  if (!serverConfigured()) return;
+  fetch(`${serverBase()}/api/camera/presence`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${state.settings.serverToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(meta),
+  }).catch(() => {});
+}
+
+/** Listen for commands from the dashboard (arm, disarm, start, stop). */
+function connectServerEvents() {
+  state.serverEs?.close();
+  state.serverEs = null;
+  if (!serverConfigured()) return;
+  const es = new EventSource(`${serverBase()}/api/events?token=${encodeURIComponent(state.settings.serverToken)}`);
+  state.serverEs = es;
+  es.addEventListener('command', (ev) => {
+    let c = null;
+    try {
+      c = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    handleServerCommand(c);
+  });
+  es.onopen = () => {
+    if (state.serverOk !== true) {
+      state.serverOk = true;
+      updateStoreStatus();
+    }
+  };
+  es.onerror = () => {
+    if (state.serverOk !== false) {
+      state.serverOk = false;
+      updateStoreStatus();
+    }
+  };
+}
+
+function handleServerCommand(c) {
+  switch (c.action) {
+    case 'arm':
+    case 'disarm': {
+      const armed = c.action === 'arm';
+      if (state.armed !== armed) {
+        state.armed = armed;
+        localSet('hr.armed', armed);
+        updateArmedUI();
+        log(`${armed ? 'Armed' : 'Disarmed'} from the dashboard`, 'warn');
+        pushPresence(presenceMeta(state.tracker?.tracks || []));
+      }
+      break;
+    }
+    case 'start':
+      if (!state.running) startCamera();
+      break;
+    case 'stop':
+      if (state.running) stopCamera();
+      break;
+    default:
+      break;
+  }
+}
+
+async function testServer() {
+  const next = readSettingsForm();
+  if (!next.serverUrl || !next.serverToken) return toast('Enter the server URL and token first', 'error');
+  const base = next.serverUrl.trim().replace(/\/$/, '');
+  els.serverStatus.textContent = 'Testing…';
+  try {
+    const res = await fetch(`${base}/api/status`, { headers: { Authorization: `Bearer ${next.serverToken.trim()}` } });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+    els.serverStatus.textContent = `Connected to home server v${json.version}${json.mock ? ' (mock devices)' : ''}`;
+    toast('Home server reachable. Save settings to use it.');
+  } catch (e) {
+    els.serverStatus.textContent = `Failed: ${e.message}`;
+    toast(`Home server: ${e.message}${location.protocol === 'https:' && base.startsWith('http:') ? ' (this page is HTTPS, so the server must be HTTPS too)' : ''}`, 'error');
+  }
 }
 
 // ---------------------------------------------------------------- presence, events, alarm
@@ -1625,8 +1758,11 @@ async function applySettings(next, { reconnect = true } = {}) {
   els.videoWrap.classList.toggle('mirror', !!next.mirror);
   state.tracker?.setOptions({ threshold: next.matchThreshold, margin: next.matchMargin });
   if (state.recorder) state.recorder.maxSec = next.clipMaxSec;
-  if (reconnect && (prev.supabaseUrl !== next.supabaseUrl || prev.supabaseAnonKey !== next.supabaseAnonKey)) {
+  const serverChanged = prev.serverUrl !== next.serverUrl || prev.serverToken !== next.serverToken;
+  if (reconnect && (serverChanged || prev.supabaseUrl !== next.supabaseUrl || prev.supabaseAnonKey !== next.supabaseAnonKey)) {
+    state.serverOk = null;
     await store.configure(next);
+    connectServerEvents();
     await loadProfiles();
     await loadCalibration();
   }
@@ -1842,6 +1978,16 @@ function bind() {
   els.btnCalibClear.addEventListener('click', clearCalibration);
 
   els.settingsForm.addEventListener('submit', saveSettingsForm);
+  els.btnTestServer.addEventListener('click', testServer);
+  els.btnUseServerLock.addEventListener('click', () => {
+    const f = els.settingsForm;
+    const url = f.elements.serverUrl.value.trim().replace(/\/$/, '');
+    if (!url) return toast('Enter the server URL first', 'error');
+    f.elements.lockWebhookUrl.value = `${url}/api/door/lock`;
+    f.elements.lockWebhookToken.value = f.elements.serverToken.value.trim();
+    f.elements.lockOnUnknown.checked = true;
+    toast('Door lock now goes through the home server. Save settings to apply.');
+  });
   els.btnSignIn.addEventListener('click', signIn);
   els.btnSignOut.addEventListener('click', signOut);
   els.btnRequestNotify.addEventListener('click', async () => {
@@ -1878,10 +2024,13 @@ async function init() {
   applyMode();
   ai.configure({ apiKey: state.settings.aiApiKey });
   await store.configure(state.settings);
+  connectServerEvents();
   await loadProfiles();
   await loadCalibration();
   listCameras();
   if (!navigator.mediaDevices?.getUserMedia) toast('This browser cannot access cameras. Use Chrome, Edge or Safari over HTTPS.', 'error');
+  const wanted = location.hash.replace('#', '');
+  if (['live', 'people', 'events', 'calibrate', 'settings'].includes(wanted)) showView(wanted);
 }
 
 // Exposed for debugging and the end-to-end test.
