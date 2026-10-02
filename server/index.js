@@ -336,8 +336,38 @@ function lanAddresses() {
   return out;
 }
 
+function parseArgs(argv) {
+  const out = { mock: false, config: '', port: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--mock' || a === '--demo') out.mock = true;
+    else if (a === '--config' && argv[i + 1]) out.config = argv[++i];
+    else if (a === '--port' && argv[i + 1]) out.port = Number(argv[++i]);
+    else if (a === '--help' || a === '-h') {
+      console.log('Usage: node server/index.js [--mock] [--config path/to/config.json] [--port 8787]');
+      process.exit(0);
+    }
+  }
+  return out;
+}
+
 async function main() {
-  const config = loadConfig();
+  const args = parseArgs(process.argv.slice(2));
+  if (args.config) process.env.HOME_SERVER_CONFIG = args.config;
+  const config = loadConfig(args.mock ? { mock: true, dataDir: path.join(SERVER_DIR, 'data-mock'), token: 'demo-token-change-me' } : {});
+  if (args.port) config.port = args.port;
+  if (args.mock) {
+    const app = createServer(config);
+    const addr = await app.listen();
+    console.log(`Room Guard home server v${VERSION} (MOCK devices: nothing is wired, everything is simulated)`);
+    console.log(`  dashboard:  http://localhost:${addr.port}/dashboard.html?token=${config.token}`);
+    for (const ip of lanAddresses()) console.log(`              http://${ip}:${addr.port}/dashboard.html?token=${config.token}`);
+    console.log(`  token:      ${config.token}`);
+    const shutdown = () => app.close().then(() => process.exit(0));
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    return;
+  }
   if (!config.token) {
     config.token = randomToken();
     const file = config.configFile;

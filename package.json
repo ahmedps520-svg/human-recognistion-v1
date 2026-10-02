@@ -9,7 +9,7 @@
     "test:e2e": "node tests/e2e/smoke.mjs",
     "serve": "node tests/e2e/serve.mjs",
     "server": "node server/index.js",
-    "server:mock": "HOME_SERVER_CONFIG=server/config.mock.json node server/index.js",
+    "server:mock": "node server/index.js --mock",
     "test:e2e:dashboard": "node tests/e2e/dashboard.mjs"
   },
   "devDependencies": {

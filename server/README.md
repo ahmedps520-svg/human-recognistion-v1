@@ -15,7 +15,14 @@ and gives you one place for everything:
 ```
 npm run server            # uses server/config.json (created with a token on first run)
 npm run server:mock       # demo with simulated devices, token "demo-token-change-me"
+node server/index.js --mock --port 9000      # the same, with options
+node server/index.js --config C:\path\to\other-config.json
 ```
+
+On Windows, open PowerShell or Command Prompt **inside the project folder**
+first (in File Explorer, open the folder, then type `cmd` in the address bar
+and press Enter). When Windows Firewall asks, allow Node.js on private
+networks so your iPad can reach the server.
 
 Then open `http://<that computer>:8787/dashboard.html`, press **Connect**
 and paste the token the server printed. Copy `server/config.example.json`
