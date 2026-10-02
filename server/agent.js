@@ -61,24 +61,23 @@ function fileStorage(file) {
 
 function ask(question, { hidden = false } = {}) {
   return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
     if (hidden) {
-      // Echo stars instead of the password.
-      const onKey = () => {
-        readline.moveCursor(process.stdout, -rl.line.length - 1, 0);
-        process.stdout.write(`${question}${'*'.repeat(rl.line.length)}`);
+      // Nothing is echoed while the password is typed (works in Windows Terminal, cmd and PowerShell).
+      rl._writeToOutput = (str) => {
+        if (str.startsWith(question)) rl.output.write(question);
       };
-      process.stdin.on('keypress', onKey);
       rl.question(question, (answer) => {
-        process.stdin.off('keypress', onKey);
         rl.close();
         process.stdout.write('\n');
         resolve(answer);
       });
-    } else rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer);
-    });
+    } else {
+      rl.question(question, (answer) => {
+        rl.close();
+        resolve(answer);
+      });
+    }
   });
 }
 
@@ -101,8 +100,9 @@ async function main() {
   // Which cloud project: --url/--key, then server/config.json "cloud", then the site's baked-in values.
   let cloudCfg = { url: args.url || config.cloud?.url || CLOUD.supabaseUrl || '', anonKey: args.key || config.cloud?.anonKey || CLOUD.supabaseAnonKey || '' };
   if (!cloudCfg.url || !cloudCfg.anonKey) {
-    console.log(`Room Guard home agent v${AGENT_VERSION}\nFirst-time setup: paste the Project URL and the anon public key from your Supabase project (Settings → API).`);
-    cloudCfg = { url: (await ask('Project URL: ')).trim().replace(/\/$/, ''), anonKey: (await ask('Anon key: ')).trim() };
+    console.log(`Room Guard home agent v${AGENT_VERSION}\nFirst-time setup (only once): copy from Supabase → Project Settings → API Keys.`);
+    if (!cloudCfg.url) cloudCfg.url = (await ask('Project URL: ')).trim().replace(/\/$/, '');
+    if (!cloudCfg.anonKey) cloudCfg.anonKey = (await ask('Publishable / anon key: ')).trim();
     if (!cloudCfg.url || !cloudCfg.anonKey) throw new Error('Both values are needed.');
     saveCloudToConfig(config.configFile, cloudCfg);
     console.log(`Saved to ${path.relative(process.cwd(), config.configFile)}.`);
@@ -117,7 +117,7 @@ async function main() {
     console.log(`Room Guard home agent v${AGENT_VERSION}\nSign in with your home account (the same email + password as the dashboard). It is remembered on this PC.`);
     for (let attempt = 0; attempt < 3 && !cloud.user; attempt++) {
       const email = (await ask('Email: ')).trim();
-      const password = await ask('Password: ', { hidden: true });
+      const password = await ask('Password (hidden while you type, press Enter when done): ', { hidden: true });
       try {
         await cloud.signIn(email, password);
       } catch (e) {
