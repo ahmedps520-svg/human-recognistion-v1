@@ -26,15 +26,18 @@ read. You create that project once; after that it is only email + password.
 
 ## 2. Tell the site about the project
 
-Two options:
+The project URL is already baked into the site (`CLOUD.supabaseUrl` in
+`assets/js/config.js`). What is still missing is the **anon public key**:
 
-- **Bake it in (recommended, once).** Put the two values into
-  `assets/js/config.js` under `CLOUD` and push to `main`. From then on every
-  device only sees the email + password screen. (Send me the URL and the
-  anon key in chat and I will do this for you. Never send the password.)
+- **Bake it in (recommended, once).** Put it into `assets/js/config.js`
+  under `CLOUD.supabaseAnonKey` and push to `main`. From then on every
+  device only sees the email + password screen. (Send me the key in chat
+  and I will do this for you. Never send the password.)
 - **Per device.** Open the site, expand **First-time setup** on the sign-in
-  screen and paste the URL and the key there. It is remembered in that
-  browser.
+  screen and paste the key there. It is remembered in that browser.
+
+The key is public by design: every table still needs the sign-in from
+step 3 (row level security), so the key alone cannot read anything.
 
 ## 3. Sign in on each device
 

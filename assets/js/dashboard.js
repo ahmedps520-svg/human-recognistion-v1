@@ -94,7 +94,9 @@ function showGate() {
   $('gate').setAttribute('aria-hidden', 'false');
   $('gateSetup').open = !cfg.configured;
   $('gateSetup').classList.toggle('hidden', cfg.source === 'baked');
-  $('gateProject').textContent = cfg.configured ? `Project: ${cfg.url.replace(/^https?:\/\//, '')}` : 'No cloud project on this device yet';
+  $('gateForm').elements.url.value = cfg.url || '';
+  $('gateForm').elements.url.closest('label').classList.toggle('hidden', cfg.bakedUrl);
+  $('gateProject').textContent = cfg.configured ? `Project: ${cfg.url.replace(/^https?:\/\//, '')}` : cfg.url ? `Project: ${cfg.url.replace(/^https?:\/\//, '')} · paste its anon key once` : 'No cloud project on this device yet';
   $('gateError').classList.add('hidden');
   setLive(false, 'Sign in to see your room');
   setTimeout(() => $('gateForm').elements.email.focus(), 50);
@@ -116,7 +118,7 @@ async function gateSubmit(ev) {
   btn.disabled = true;
   try {
     if (!readCloudConfig(CLOUD).configured || (url && anonKey)) {
-      if (!url || !anonKey) throw new Error('First-time setup: paste the project URL and the anon key from Supabase → Settings → API.');
+      if (!url || !anonKey) throw new Error(url ? 'First-time setup: paste the anon key from Supabase → Settings → API Keys.' : 'First-time setup: paste the project URL and the anon key from Supabase → Settings → API Keys.');
       saveCloudConfig({ url, anonKey });
       if (cloud) await cloud.close().catch(() => {});
       cloud = null;

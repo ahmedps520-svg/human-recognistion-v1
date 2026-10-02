@@ -9,7 +9,7 @@ export const APP_VERSION = '0.4.0';
 // signed-in user). Leave empty to run the camera app from browser storage only;
 // the sign-in screen then offers a one-time "first-time setup" box instead.
 export const CLOUD = {
-  supabaseUrl: '',
+  supabaseUrl: 'https://egpigzzvngwjhqhurtfg.supabase.co',
   supabaseAnonKey: '',
 };
 

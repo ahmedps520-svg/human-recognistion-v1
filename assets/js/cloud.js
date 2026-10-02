@@ -32,15 +32,17 @@ export function readCloudConfig(baked = {}) {
   } catch {
     local = null;
   }
+  // Baked values win; whatever is missing can be filled in on this device.
+  const url = String(baked.supabaseUrl || local?.url || '').trim().replace(/\/$/, '');
+  const anonKey = String(baked.supabaseAnonKey || local?.anonKey || '').trim();
+  const configured = !!(url && anonKey);
   const bakedOk = !!(baked.supabaseUrl && baked.supabaseAnonKey);
-  const url = String((bakedOk ? baked.supabaseUrl : local?.url) || '').trim().replace(/\/$/, '');
-  const anonKey = String((bakedOk ? baked.supabaseAnonKey : local?.anonKey) || '').trim();
-  return { url, anonKey, configured: !!(url && anonKey), source: bakedOk ? 'baked' : url && anonKey ? 'local' : null };
+  return { url, anonKey, configured, bakedUrl: !!baked.supabaseUrl, source: bakedOk ? 'baked' : configured ? 'local' : null };
 }
 
 export function saveCloudConfig({ url, anonKey }) {
   if (!hasStorage()) return false;
-  const clean = { url: String(url || '').trim().replace(/\/$/, ''), anonKey: String(anonKey || '').trim() };
+  const clean = { url: String(url || '').trim().replace(/\/$/, ''), anonKey: String(anonKey || '').trim().replace(/^anon\s*(public)?\s*:?\s*/i, '') };
   if (!/^https:\/\/[a-z0-9-]+\.supabase\.(co|in|red)$/i.test(clean.url) && !/^https?:\/\//i.test(clean.url)) throw new Error('The project URL should look like https://xxxx.supabase.co');
   if (clean.anonKey.length < 20) throw new Error('That does not look like the anon key (it is a long string starting with "eyJ" or "sb_publishable_")');
   localStorage.setItem(CLOUD_KEY, JSON.stringify(clean));

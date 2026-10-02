@@ -35,6 +35,11 @@ test('cloud config: baked values win, local setup is the fallback', () => {
   const baked = readCloudConfig({ supabaseUrl: 'https://baked.supabase.co', supabaseAnonKey: 'y'.repeat(30) });
   assert.equal(baked.source, 'baked');
   assert.equal(baked.url, 'https://baked.supabase.co');
+  const mixed = readCloudConfig({ supabaseUrl: 'https://baked.supabase.co', supabaseAnonKey: '' });
+  assert.equal(mixed.configured, true, 'baked URL + key saved on the device');
+  assert.equal(mixed.url, 'https://baked.supabase.co');
+  assert.equal(mixed.bakedUrl, true);
+  assert.equal(mixed.source, 'local');
   assert.throws(() => saveCloudConfig({ url: 'nope', anonKey: 'short' }));
   clearCloudConfig();
   assert.equal(readCloudConfig({}).configured, false);

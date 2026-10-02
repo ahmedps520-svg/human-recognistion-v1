@@ -8,6 +8,7 @@
 .gate-card h1 { margin: 0; font-size: 1.5rem; text-align: center; letter-spacing: .01em; }
 .gate-logo { font-size: 2.6rem; text-align: center; line-height: 1; }
 .gate-sub { margin: 0; text-align: center; color: #9ca3af; font-size: .9rem; }
+.gate-card label.hidden { display: none; }
 .gate-card label { display: grid; gap: .3rem; font-size: .85rem; color: #cbd5e1; }
 .gate-card input { font: inherit; font-size: 1rem; padding: .7rem .8rem; border-radius: 12px; border: 1px solid rgba(255, 255, 255, .14); background: rgba(0, 0, 0, .3); color: #f3f4f6; }
 .gate-card input:focus { outline: 2px solid rgba(99, 102, 241, .7); outline-offset: 1px; }
