@@ -19,25 +19,18 @@ read. You create that project once; after that it is only email + password.
    This is the one household account every device signs in with.
 4. Open **Authentication → Sign In / Providers → Email** and turn **off**
    "Allow new users to sign up", so nobody else can create an account.
-5. Open **Project Settings → API** (or **Settings → API Keys**) and copy two
-   things: the **Project URL** (`https://xxxx.supabase.co`) and the
-   **anon public** key (a long string). Both are safe to share with your
-   own devices; the tables still need the sign-in from step 3.
+5. Open **Project Settings → API Keys** and copy the **Publishable key**
+   (`sb_publishable_…`; on older projects the **anon public** key under
+   Legacy API Keys). It is safe to share with your own devices; the tables
+   still need the sign-in from step 3.
 
 ## 2. Tell the site about the project
 
-The project URL is already baked into the site (`CLOUD.supabaseUrl` in
-`assets/js/config.js`). What is still missing is the **anon public key**:
-
-- **Bake it in (recommended, once).** Put it into `assets/js/config.js`
-  under `CLOUD.supabaseAnonKey` and push to `main`. From then on every
-  device only sees the email + password screen. (Send me the key in chat
-  and I will do this for you. Never send the password.)
-- **Per device.** Open the site, expand **First-time setup** on the sign-in
-  screen and paste the key there. It is remembered in that browser.
-
-The key is public by design: every table still needs the sign-in from
-step 3 (row level security), so the key alone cannot read anything.
+Done: the project URL and its publishable key are built into the site
+(`CLOUD` in `assets/js/config.js`), so every device only asks for email +
+password. The publishable key is public by design: every table needs the
+sign-in from step 3, enforced by grants and row level security. Never put a
+**secret** or **service_role** key in the site.
 
 ## 3. Sign in on each device
 

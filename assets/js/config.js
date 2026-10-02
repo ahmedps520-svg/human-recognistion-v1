@@ -4,13 +4,13 @@
 export const APP_VERSION = '0.4.0';
 
 // The cloud project that connects the camera app, the dashboard and the home
-// agent. Both values are public (the anon key is meant to be shipped to
-// browsers; every table is locked down by row level security and needs a
-// signed-in user). Leave empty to run the camera app from browser storage only;
-// the sign-in screen then offers a one-time "first-time setup" box instead.
+// agent. Both values are public by design: the publishable key is meant to be
+// shipped to browsers, and every table is locked to the signed-in household
+// account by grants and row level security (supabase/schema.sql). Never put a
+// secret / service_role key here.
 export const CLOUD = {
   supabaseUrl: 'https://egpigzzvngwjhqhurtfg.supabase.co',
-  supabaseAnonKey: '',
+  supabaseAnonKey: 'sb_publishable_DUh6yN6BZM3bE_8TUkPbqQ_Y_tPaxAz',
 };
 
 // Heavy assets are fetched from pinned CDN locations. Point these at your own

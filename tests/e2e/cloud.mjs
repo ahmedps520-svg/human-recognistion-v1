@@ -100,14 +100,21 @@ try {
   const dash = await openPage('dashboard');
   await dash.goto(`${url}/dashboard.html`);
   await dash.waitForSelector('#gate:not(.hidden)');
-  assert(await dash.evaluate(() => document.getElementById('gateSetup').open), 'first-time setup box is open when the key is missing');
-  assert((await text(dash, '#gateProject')).includes(PROJECT_HOST), 'the baked-in project is named on the sign-in screen');
-  const urlHidden = await dash.evaluate(() => document.querySelector('#gateForm input[name="url"]').closest('label').classList.contains('hidden'));
-  assert(urlHidden === !!CLOUD.supabaseUrl, 'the URL field is hidden when the URL is baked in');
+  const fullyBaked = !!(CLOUD.supabaseUrl && CLOUD.supabaseAnonKey);
+  const setupHidden = await dash.evaluate(() => document.getElementById('gateSetup').classList.contains('hidden'));
+  if (fullyBaked) assert(setupHidden, 'only email and password are asked: the project is built into the site');
+  else {
+    assert(await dash.evaluate(() => document.getElementById('gateSetup').open), 'first-time setup box is open when the key is missing');
+    const urlHidden = await dash.evaluate(() => document.querySelector('#gateForm input[name="url"]').closest('label').classList.contains('hidden'));
+    assert(urlHidden === !!CLOUD.supabaseUrl, 'the URL field is hidden when the URL is baked in');
+  }
+  assert((await text(dash, '#gateProject')).includes(PROJECT_HOST), 'the project is named on the sign-in screen');
   await dash.fill('#gateForm input[name="email"]', EMAIL);
   await dash.fill('#gateForm input[name="password"]', 'wrong');
-  if (!CLOUD.supabaseUrl) await dash.fill('#gateForm input[name="url"]', PROJECT);
-  await dash.fill('#gateForm input[name="anonKey"]', ANON);
+  if (!fullyBaked) {
+    if (!CLOUD.supabaseUrl) await dash.fill('#gateForm input[name="url"]', PROJECT);
+    await dash.fill('#gateForm input[name="anonKey"]', ANON);
+  }
   await dash.click('#gateForm button[type="submit"]');
   await dash.waitForSelector('#gateError:not(.hidden)');
   assert((await text(dash, '#gateError')).includes('Wrong email or password'), 'wrong password is explained');
@@ -213,7 +220,7 @@ try {
   await until(() => !agentCloud.presence.camera);
   assert(!agentCloud.presence.camera, 'agent sees the camera leave');
   assert((await text(cam, '#gateProject')).includes(PROJECT_HOST), 'camera sign-in screen already knows the project saved on this device');
-  assert(!(await cam.evaluate(() => document.getElementById('gateSetup').open)), 'first-time setup box stays closed once a project is saved');
+  assert(!(await cam.evaluate(() => document.getElementById('gateSetup').open)), 'first-time setup box stays closed once the project is known');
   await cam.fill('#gateForm input[name="email"]', EMAIL);
   await cam.fill('#gateForm input[name="password"]', PASSWORD);
   await cam.click('#gateForm button[type="submit"]');

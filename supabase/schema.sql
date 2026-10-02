@@ -99,6 +99,25 @@ create table if not exists public.activity (
 );
 create index if not exists activity_at_idx on public.activity (at desc);
 
+-- ---------------------------------------------------------------- table privileges
+-- Supabase no longer opens new tables to the Data API automatically
+-- (changelog 2026-04-28), so the access the apps need is granted explicitly.
+-- Signed-in users get only what the camera app, dashboard and home agent
+-- use; signed-out visitors (anon) get nothing. RLS below still applies.
+revoke all on public.profiles, public.events, public.cameras, public.home, public.device_states, public.activity from anon, authenticated;
+grant select, insert, update, delete on public.profiles, public.events to authenticated;
+grant select, insert, update on public.cameras, public.home, public.device_states to authenticated;
+grant select, insert on public.activity to authenticated;
+grant usage on schema public to authenticated;
+do $$
+declare seq text := pg_get_serial_sequence('public.activity', 'id');
+begin
+  if seq is not null then
+    execute format('grant usage, select on sequence %s to authenticated', seq);
+  end if;
+end $$;
+grant all on public.profiles, public.events, public.cameras, public.home, public.device_states, public.activity to service_role;
+
 -- ---------------------------------------------------------------- row level security
 alter table public.profiles      enable row level security;
 alter table public.events        enable row level security;
