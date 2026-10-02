@@ -1,7 +1,7 @@
 // Central configuration: pinned asset URLs, landmark indices and default settings.
 // Everything here is plain data so it can be imported from Node tests as well as the browser.
 
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.3.0';
 
 // Heavy assets are fetched from pinned CDN locations. Point these at your own
 // hosting if you prefer to self-host (see vendor/README.md). The WASM runtime
