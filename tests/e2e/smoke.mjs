@@ -237,6 +237,7 @@ async function identifyScenario() {
   });
   await page.reload();
   await waitFor(page, () => !!window.roomGuard && window.roomGuard.state.settings.mode === 'identify', { label: 'identify mode', timeout: 15000 });
+  await skipGate();
   step('app booted in identify mode');
 
   await page.click('#btnStart');
