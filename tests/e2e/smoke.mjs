@@ -82,6 +82,9 @@ const browser = await chromium.launch({
 });
 const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
 const page = await context.newPage();
+// Headless Chromium here renders the ML models in software, so every frame blocks the page
+// for seconds; give clicks and fills time to land (real devices are two orders of magnitude faster).
+page.setDefaultTimeout(120000);
 
 const pageErrors = [];
 page.on('pageerror', (e) => pageErrors.push(String(e)));
