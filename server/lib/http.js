@@ -54,6 +54,7 @@ export async function readJson(req, { limit = 5 * 1024 * 1024 } = {}) {
 export class SseHub {
   constructor() {
     this.clients = new Set();
+    this.subscribers = new Set();
     this.keepalive = setInterval(() => {
       for (const res of this.clients) res.write(': ping\n\n');
     }, 25000);
@@ -73,7 +74,20 @@ export class SseHub {
     req.on('close', () => this.clients.delete(res));
   }
 
+  /** In-process listener (automations, logging). Returns an unsubscribe function. */
+  subscribe(fn) {
+    this.subscribers.add(fn);
+    return () => this.subscribers.delete(fn);
+  }
+
   broadcast(event) {
+    for (const fn of this.subscribers) {
+      try {
+        fn(event);
+      } catch (e) {
+        console.error('subscriber failed', e);
+      }
+    }
     const payload = `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const res of this.clients) {
       try {

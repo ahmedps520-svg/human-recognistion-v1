@@ -350,7 +350,8 @@ async function stopCamera() {
   await finalizeRecording();
   releaseWakeLock();
   stopStream();
-  pushPresence({ people: 0, armed: state.armed, recording: false, mode: state.settings.mode, tracks: [] });
+  if (framePushPromise) await framePushPromise.catch(() => {}); // let the last frame upload land first
+  await pushPresence({ people: 0, armed: state.armed, recording: false, alarm: false, mode: state.settings.mode, tracks: [] });
   const ctx = els.overlay.getContext('2d');
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
   els.stagePlaceholder.classList.remove('hidden');
@@ -470,22 +471,32 @@ const serverConfigured = () => !!(state.settings.serverUrl && state.settings.ser
 const serverBase = () => state.settings.serverUrl.trim().replace(/\/$/, '');
 let framePushAt = 0;
 let framePushBusy = false;
+let framePushPromise = null;
 
 function presenceMeta(tracks) {
   return {
     people: tracks.length,
     armed: state.armed,
     recording: !!state.session,
+    alarm: !!state.alarmActive,
     mode: state.settings.mode,
     tracks: tracks.map((tr) => ({ id: tr.id, label: labelFor(effectiveIdentity(tr)), since: Math.round((tr.lastSeen - tr.firstSeen) / 1000) })),
   };
 }
 
-async function maybePushFrame(now, tracks) {
+function maybePushFrame(now, tracks) {
   const s = state.settings;
   if (!serverConfigured() || !s.serverPushFrames || framePushBusy || now - framePushAt < (s.serverFrameMs || 500)) return;
   framePushBusy = true;
   framePushAt = now;
+  framePushPromise = pushFrameNow(tracks).finally(() => {
+    framePushBusy = false;
+    framePushPromise = null;
+  });
+}
+
+async function pushFrameNow(tracks) {
+  const s = state.settings;
   try {
     const snap = await captureSnapshot(els.video, { maxWidth: 640, quality: 0.6 });
     if (!snap?.blob) return;
@@ -505,14 +516,12 @@ async function maybePushFrame(now, tracks) {
       state.serverOk = false;
       updateStoreStatus();
     }
-  } finally {
-    framePushBusy = false;
   }
 }
 
 function pushPresence(meta) {
-  if (!serverConfigured()) return;
-  fetch(`${serverBase()}/api/camera/presence`, {
+  if (!serverConfigured()) return Promise.resolve();
+  return fetch(`${serverBase()}/api/camera/presence`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${state.settings.serverToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(meta),
@@ -568,6 +577,10 @@ function handleServerCommand(c) {
       break;
     case 'stop':
       if (state.running) stopCamera();
+      break;
+    case 'siren':
+      siren.start(3);
+      log('Siren test from the dashboard', 'warn');
       break;
     default:
       break;
@@ -804,6 +817,7 @@ async function fireAlarm(tr, p, message = 'Someone is in the room') {
   state.alarmActive = true;
   els.alarmText.textContent = `⚠️ ${message}`;
   els.alarmBanner.classList.remove('hidden');
+  pushPresence(presenceMeta(state.tracker?.tracks || []));
   if (s.alarmEnabled) siren.start(s.alarmDurationSec);
   if (s.notifyEnabled) notify('⚠️ Room Guard', message);
   if (s.lockOnUnknown && s.lockWebhookUrl) {
@@ -818,6 +832,7 @@ function dismissAlarm() {
   siren.stop();
   state.alarmActive = false;
   els.alarmBanner.classList.add('hidden');
+  pushPresence(presenceMeta(state.tracker?.tracks || []));
 }
 
 // ---------------------------------------------------------------- recording

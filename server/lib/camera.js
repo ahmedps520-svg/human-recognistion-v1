@@ -41,8 +41,10 @@ export class CameraService {
     this.profiles = readJsonFile(this.files.profiles, []);
     this.cameras = readJsonFile(this.files.cameras, {});
     this.frame = null; // { buffer, at, meta }
-    this.presence = { people: 0, armed: false, recording: false, tracks: [] };
+    this.presence = { people: 0, armed: false, recording: false, alarm: false, tracks: [] };
     this.presenceAt = 0;
+    this.occupiedSince = null;
+    this.emptySince = null;
     this.streams = new Set();
     this.writeQueue = Promise.resolve();
   }
@@ -63,14 +65,26 @@ export class CameraService {
   }
 
   setPresence(p) {
+    const prev = this.presence;
     this.presence = {
       people: Number(p.people) || 0,
       armed: !!p.armed,
       recording: !!p.recording,
-      mode: p.mode || this.presence.mode || 'presence',
+      alarm: !!p.alarm,
+      mode: p.mode || prev.mode || 'presence',
       tracks: Array.isArray(p.tracks) ? p.tracks.slice(0, 10) : [],
     };
     this.presenceAt = Date.now();
+    if (prev.people === 0 && this.presence.people > 0) {
+      this.occupiedSince = Date.now();
+      this.hub.broadcast({ type: 'presence', state: 'enter', people: this.presence.people, at: this.presenceAt });
+    } else if (prev.people > 0 && this.presence.people === 0) {
+      this.occupiedSince = null;
+      this.emptySince = Date.now();
+      this.hub.broadcast({ type: 'presence', state: 'leave', people: 0, at: this.presenceAt });
+    }
+    if (!prev.alarm && this.presence.alarm) this.hub.broadcast({ type: 'alarm', source: 'camera', at: this.presenceAt });
+    if (prev.armed !== this.presence.armed) this.hub.broadcast({ type: 'armed', armed: this.presence.armed, at: this.presenceAt });
   }
 
   status() {
@@ -80,6 +94,8 @@ export class CameraService {
       lastFrameAt: this.frame?.at || null,
       presence: this.presence,
       presenceAt: this.presenceAt || null,
+      occupiedSince: this.occupiedSince,
+      emptySince: this.emptySince,
       visitsToday: this.events.filter((e) => new Date(e.startedAt).toDateString() === new Date().toDateString()).length,
       lastVisit: this.events[0] || null,
     };
@@ -116,7 +132,7 @@ export class CameraService {
   }
 
   command(action, payload = {}) {
-    const allowed = ['arm', 'disarm', 'snapshot', 'stop', 'start'];
+    const allowed = ['arm', 'disarm', 'snapshot', 'stop', 'start', 'siren'];
     if (!allowed.includes(action)) throw new HttpError(400, `Unknown command "${action}"`);
     const cmd = { type: 'command', action, payload, at: Date.now(), id: uuid() };
     this.hub.broadcast(cmd);
@@ -145,7 +161,9 @@ export class CameraService {
   updateEvent(id, patch) {
     const idx = this.events.findIndex((x) => x.id === id);
     if (idx < 0) throw new HttpError(404, 'Event not found');
-    this.events[idx] = { ...this.events[idx], ...patch, id };
+    const before = this.events[idx];
+    this.events[idx] = { ...before, ...patch, id };
+    if (!before.alarmTriggered && this.events[idx].alarmTriggered) this.hub.broadcast({ type: 'alarm', source: 'visit', eventId: id, at: Date.now() });
     this._persist('events');
     this.hub.broadcast({ type: 'visit', action: 'update', event: this.events[idx] });
     return this.events[idx];

@@ -203,14 +203,17 @@ server/                 home server: API, device adapters, mock mode, tests
 
 `server/` is a dependency-free Node.js process for a computer at home. It
 receives the camera's live feed and visit log, stores clips on disk, and
-serves a **dashboard** (`dashboard.html`) that puts the live feed, the
-visits, the **Minecraft server** (status, players, start/stop/restart, RCON
-console), the **air conditioning** (Sensibo, Home Assistant or webhooks),
-the **door switch** (Shelly, Tasmota, Home Assistant or webhooks) and the
-**Govee lights** (cloud API) on one screen. The dashboard can also arm and
-disarm the camera remotely. `npm run server:mock` starts it with simulated
-devices so you can try the dashboard immediately. Setup, remote access
-(Tailscale) and the API are described in [server/README.md](server/README.md).
+serves a **smart-room dashboard** (`dashboard.html`): a dark-glass control
+centre that updates live and shows person detection and the live feed, a
+security panel with the door lock, room modes (Home / Away / Sleep / Guest),
+one-tap scenes, automations (schedules, "room empty for N minutes",
+"intruder response"), climate with room sensors, Govee lights, extra plugs
+and switches, the visit log, an activity timeline, outdoor weather, phone
+alerts through ntfy or Telegram, and the Minecraft server (status, players,
+start/stop/restart, RCON console). `npm run server:mock` starts it with
+simulated devices so you can use the whole dashboard before anything is
+wired in. Setup, remote access (Tailscale) and the API are described in
+[server/README.md](server/README.md).
 
 ## Claude vision assistant (optional)
 

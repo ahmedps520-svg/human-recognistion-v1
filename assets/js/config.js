@@ -85,7 +85,7 @@ export const DEFAULT_SETTINGS = {
   serverUrl: '',
   serverToken: '',
   serverPushFrames: true,
-  serverFrameMs: 500,
+  serverFrameMs: 100, // 10 frames per second to the dashboard
   supabaseUrl: '',
   supabaseAnonKey: '',
   supabaseEmail: '',

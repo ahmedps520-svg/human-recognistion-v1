@@ -36,6 +36,20 @@ Useful environment variables: `PORT`, `HOME_SERVER_TOKEN`, `GOVEE_API_KEY`,
 
 Set `"mock": true` to simulate all devices while you build things.
 
+## The smart room: modes, scenes, automations and more
+
+| Feature | Config | What it does |
+| --- | --- | --- |
+| Modes | – | Home / Away / Sleep / Guest, switched from the dashboard or by scenes; automations can be conditioned on the mode. |
+| Scenes | `scenes` (optional; defaults built in: I'm home, Wake up, Focus, Movie, Sleep, Away) | One tap runs a list of actions: `{device:'lights', all:{power,brightness,color,colorTempK}}`, `{device:'ac', set:{…}}`, `{device:'door', action}`, `{device:'switch', id, action}`, `{device:'switches', all:'off'}`, `{device:'camera', command:'arm'}`, `{device:'notify', title, message}`, `{device:'mode', mode}`, `{device:'scene', id}`. A scene with `mode` also sets the mode. |
+| Automations | `automations` (optional; defaults built in) | `trigger`: `{type:'alarm'}`, `{type:'presence'}` (someone entered), `{type:'empty', minutes:15}`, `{type:'schedule', at:'23:00'}`, `{type:'door', state:'open'}`, `{type:'armed', armed:true}`. Optional `conditions`: `{mode, armed, between:['22:00','07:00']}`. Toggles are saved in `data/automations.json`. Only "Intruder response" is on by default. |
+| Plugs & switches | `switches: [{id, name, icon, adapter, shelly|tasmota|homeassistant|webhook}]` | Any relay, same adapters as the door. |
+| Sensors | `sensors: [{id, name, kind, unit, entityId}]` | Home Assistant sensor entities (temperature, humidity, co2, illuminance…). |
+| Weather | `location: {lat, lon, name}` | Outdoor conditions from Open-Meteo, no key needed. |
+| Phone alerts | `notify: {adapter:'ntfy', ntfy:{topic}}` or `{adapter:'telegram', telegram:{botToken, chatId}}` | ntfy: install the ntfy app, subscribe to a topic name of your choice, put the same name in the config. |
+| Activity | – | Everything that happens is logged to `data/activity.json` and streamed to the dashboard. |
+| Room name | `roomName` | Shown at the top of the dashboard. |
+
 ## Connecting the camera app
 
 In the camera app's **Settings → Home server**, enter the server URL and
@@ -71,10 +85,14 @@ POST /api/camera/frame?meta={json}       JPEG body from the camera app (meta: pe
 GET  /api/camera/frame.jpg               latest frame
 GET  /api/camera/stream                  MJPEG live stream (use as <img src>)
 POST /api/camera/presence                {people, armed, recording, tracks}
-POST /api/camera/command                 {action: arm|disarm|start|stop}  → forwarded to the camera tab
+POST /api/camera/command                 {action: arm|disarm|start|stop|siren}  → forwarded to the camera tab
 GET/POST /api/camera/events, PUT/DELETE /api/camera/events/:id
 PUT/GET  /api/camera/media/<path>        clips and snapshots
 GET/PUT  /api/camera/profiles, /api/camera/calibration?label=
+GET/POST /api/mode {mode} ; GET /api/scenes ; POST /api/scenes/:id/run
+GET  /api/automations ; POST /api/automations/:id {enabled} ; POST /api/automations/:id/run
+GET  /api/switches ; POST /api/switches/all {action} ; POST /api/switches/:id {action}
+GET  /api/sensors ; GET /api/weather ; GET /api/activity?limit= ; POST /api/notify {title, message}
 GET  /api/minecraft ; POST /api/minecraft/start|stop|restart ; POST /api/minecraft/rcon {command}
 GET  /api/ac ; POST /api/ac {power, mode, targetTemp, fanLevel}
 GET  /api/door ; POST /api/door {action: open|close|toggle|lock|unlock|pulse} ; POST /api/door/lock (alarm webhook)

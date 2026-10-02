@@ -42,6 +42,13 @@ export const DEFAULTS = {
   },
   govee: { apiKey: '' },
   homeassistant: { url: '', token: '' },
+  roomName: 'My room',
+  location: { lat: null, lon: null, name: '' },
+  notify: { adapter: 'ntfy', ntfy: { server: 'https://ntfy.sh', topic: '', token: '' }, telegram: { botToken: '', chatId: '' } },
+  switches: [], // [{ id, name, icon, adapter: shelly|tasmota|homeassistant|webhook, shelly:{...}, tasmota:{...}, homeassistant:{...}, webhook:{...} }]
+  sensors: [], // [{ id, name, kind: temperature|humidity|co2|illuminance, unit, entityId }]
+  scenes: null, // null = built-in defaults (see server/lib/scenes.js)
+  automations: null, // null = built-in defaults (see server/lib/automations.js)
 };
 
 function merge(base, over) {

@@ -265,7 +265,7 @@
           <label>Token <input name="serverToken" type="password" autocomplete="off"></label>
           <div class="row">
             <label class="check"><input type="checkbox" name="serverPushFrames"> Send the live feed to the server</label>
-            <label>Frame interval (ms) <input name="serverFrameMs" type="number" min="200" max="5000" step="50"></label>
+            <label>Frame interval (ms; 100 = 10 fps) <input name="serverFrameMs" type="number" min="50" max="5000" step="10"></label>
           </div>
           <div class="actions">
             <button type="button" id="btnTestServer">Test connection</button>
