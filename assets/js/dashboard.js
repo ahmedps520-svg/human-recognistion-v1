@@ -1,5 +1,11 @@
-// Smart-room dashboard. Everything on screen comes from the home server
-// (server/) and updates live over its event stream.
+// Smart-room dashboard. Everything on screen comes from the cloud project
+// (tables + one realtime channel) and updates live. The home agent on the PC
+// drives the real devices; the camera app on the iPad publishes the room.
+
+import { CLOUD } from './config.js';
+import { Cloud, readCloudConfig, saveCloudConfig, clearCloudConfig } from './cloud.js';
+import { LiveViewer } from './live.js';
+import { homeFromRow, activityFromRow, defaultHome } from './rows.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -29,53 +35,22 @@ const WEATHER_ICON = (code, day) => {
   if (code <= 82) return '🌦️';
   return '⛈️';
 };
-
-// ---------------------------------------------------------------- config
-const CONF_KEY = 'hr.dash.v2';
-const conf = { serverUrl: '', token: '', cameraUrl: '', roomName: '' };
-try {
-  Object.assign(conf, JSON.parse(localStorage.getItem(CONF_KEY) || localStorage.getItem('hr.dash.v1') || '{}'));
-} catch {
-  /* ignore */
-}
-const params = new URLSearchParams(location.search);
-if (params.get('token')) {
-  conf.token = params.get('token');
-  conf.serverUrl = params.get('server') || conf.serverUrl || location.origin;
-  saveConf();
-  history.replaceState(null, '', location.pathname);
-}
-if (!conf.serverUrl && location.protocol.startsWith('http')) conf.serverUrl = location.origin;
-function saveConf() {
-  try {
-    localStorage.setItem(CONF_KEY, JSON.stringify(conf));
-  } catch {
-    /* ignore */
-  }
-}
+const AGENT_CARDS = ['cardSecurity', 'cardScenes', 'cardClimate', 'cardLights', 'cardSwitches', 'cardAutomations', 'cardMinecraft', 'cardWeather'];
 
 // ---------------------------------------------------------------- state
+let cloud = null;
+let viewer = null;
 const S = {
-  status: null,
-  es: null,
-  connected: false,
-  camera: null,
-  ac: null,
-  door: null,
-  lights: null,
-  switches: [],
-  sensors: [],
-  scenes: [],
-  automations: [],
+  home: defaultHome(),
+  devices: {},
   activity: [],
   visits: [],
-  weather: null,
-  minecraft: null,
-  home: { mode: 'home' },
-  lastAlarmAt: null,
-  alarmActive: false,
-  streamRetry: null,
+  visitsToday: 0,
+  presence: { camera: null, agent: null, dashboards: [] },
+  connected: false,
+  lastFrameAt: 0,
   rendered: {},
+  retryTimer: null,
 };
 
 let toastTimer = null;
@@ -87,23 +62,6 @@ function toast(msg, kind = '') {
   toastTimer = setTimeout(() => el.classList.add('hidden'), kind === 'error' ? 6000 : 2600);
 }
 
-const base = () => conf.serverUrl.replace(/\/$/, '');
-const withToken = (p) => `${base()}${p}${p.includes('?') ? '&' : '?'}token=${encodeURIComponent(conf.token)}`;
-
-async function api(path, { method = 'GET', body } = {}) {
-  if (!conf.serverUrl || !conf.token) throw new Error('Not connected: open Settings and enter the server URL and token');
-  const res = await fetch(`${base()}${path}`, { method, headers: { Authorization: `Bearer ${conf.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined });
-  const text = await res.text();
-  let json = null;
-  try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = null;
-  }
-  if (!res.ok) throw new Error(json?.error || `${res.status} ${res.statusText}`);
-  return json;
-}
-
 /** Render only when the data for a section changed (keeps the DOM calm). */
 function changed(key, data) {
   const sig = JSON.stringify(data);
@@ -113,7 +71,7 @@ function changed(key, data) {
 }
 
 async function act(cardId, fn) {
-  const card = $(cardId);
+  const card = cardId ? $(cardId) : null;
   card?.classList.add('busy');
   try {
     return await fn();
@@ -125,6 +83,85 @@ async function act(cardId, fn) {
   }
 }
 
+const camera = () => S.presence.camera;
+const agentOnline = () => !!S.presence.agent;
+const dev = (name) => S.devices[name] || null;
+
+// ---------------------------------------------------------------- sign-in
+function showGate() {
+  const cfg = readCloudConfig(CLOUD);
+  $('gate').classList.remove('hidden');
+  $('gate').setAttribute('aria-hidden', 'false');
+  $('gateSetup').open = !cfg.configured;
+  $('gateSetup').classList.toggle('hidden', cfg.source === 'baked');
+  $('gateProject').textContent = cfg.configured ? `Project: ${cfg.url.replace(/^https?:\/\//, '')}` : 'No cloud project on this device yet';
+  $('gateError').classList.add('hidden');
+  setLive(false, 'Sign in to see your room');
+  setTimeout(() => $('gateForm').elements.email.focus(), 50);
+}
+
+function hideGate() {
+  $('gate').classList.add('hidden');
+  $('gate').setAttribute('aria-hidden', 'true');
+}
+
+async function gateSubmit(ev) {
+  ev.preventDefault();
+  const f = $('gateForm');
+  const email = f.elements.email.value.trim();
+  const password = f.elements.password.value;
+  const url = f.elements.url.value.trim();
+  const anonKey = f.elements.anonKey.value.trim();
+  const btn = f.querySelector('button[type="submit"]');
+  btn.disabled = true;
+  try {
+    if (!readCloudConfig(CLOUD).configured || (url && anonKey)) {
+      if (!url || !anonKey) throw new Error('First-time setup: paste the project URL and the anon key from Supabase → Settings → API.');
+      saveCloudConfig({ url, anonKey });
+      if (cloud) await cloud.close().catch(() => {});
+      cloud = null;
+      await createCloud();
+    }
+    if (!cloud) throw new Error('No cloud project configured.');
+    if (!email || !password) throw new Error('Enter your email and password.');
+    await cloud.signIn(email, password);
+    f.elements.password.value = '';
+    await enter();
+  } catch (e) {
+    $('gateError').textContent = e.message;
+    $('gateError').classList.remove('hidden');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function createCloud() {
+  const cfg = readCloudConfig(CLOUD);
+  if (!cfg.configured) return null;
+  cloud = new Cloud({ url: cfg.url, anonKey: cfg.anonKey, role: 'dashboard' });
+  await cloud.init();
+  cloud.onAuth((user) => {
+    if (!user) {
+      viewer?.stop();
+      showGate();
+    }
+  });
+  return cloud;
+}
+
+async function boot() {
+  try {
+    await createCloud();
+  } catch (e) {
+    toast(`Cloud: ${e.message}`, 'error');
+  }
+  if (!cloud || !cloud.user) {
+    showGate();
+    return;
+  }
+  await enter();
+}
+
 // ---------------------------------------------------------------- connection
 function setLive(on, text) {
   S.connected = on;
@@ -132,130 +169,103 @@ function setLive(on, text) {
   if (text) $('roomSub').textContent = text;
 }
 
-async function connect() {
-  $('roomName').textContent = conf.roomName || 'My room';
-  if (!conf.serverUrl || !conf.token) {
-    setLive(false, 'Not connected · open Settings');
-    openSheet();
+async function enter() {
+  hideGate();
+  setLive(false, 'Loading…');
+  try {
+    const [home, devices, activity] = await Promise.all([cloud.getHome(), cloud.listDevices(), cloud.listActivity(40)]);
+    S.home = home;
+    S.devices = devices;
+    S.activity = activity;
+  } catch (e) {
+    setLive(false, `Could not load the room: ${e.message}`);
+    toast(e.message, 'error');
     return;
   }
-  try {
-    const status = await api('/api/status');
-    applyStatus(status);
-    openEvents();
-    startStream();
-  } catch (e) {
-    setLive(false, `Can't reach the home server: ${e.message}`);
-    toast(e.message, 'error');
-  }
-}
-
-function openEvents() {
-  S.es?.close();
-  const es = new EventSource(withToken('/api/events'));
-  S.es = es;
-  const parse = (ev) => {
-    try {
-      return JSON.parse(ev.data);
-    } catch {
-      return null;
-    }
-  };
-  const on = (type, fn) => es.addEventListener(type, (ev) => {
-    const d = parse(ev);
-    if (d) fn(d);
-  });
-  on('status', applyStatus);
-  on('camera', (d) => {
-    S.camera = { ...(S.camera || {}), online: true, lastFrameAt: d.at, presence: d.presence };
-    renderCamera();
-    renderSecurity();
-    if ($('camStream').hidden) startStream();
-  });
-  on('presence', () => refreshCameraStatus());
-  on('armed', () => refreshCameraStatus());
-  on('alarm', (d) => {
-    S.lastAlarmAt = d.at;
-    S.alarmActive = true;
-    renderSecurity();
-    setTimeout(() => {
-      S.alarmActive = false;
+  if (!S.subscribed) {
+    S.subscribed = true;
+    cloud.onTable('home', (ev) => {
+      if (!ev.new) return;
+      const prev = S.home;
+      S.home = homeFromRow(ev.new);
+      renderModes();
       renderSecurity();
-    }, 60000);
-  });
-  on('visit', () => {
-    refreshVisits();
-    refreshCameraStatus();
-  });
-  on('mode', (d) => {
-    S.home = { ...S.home, mode: d.mode, modeSince: d.modeSince };
-    renderModes();
-  });
-  on('activity', (d) => {
-    S.activity.unshift(d.entry);
-    S.activity.length = Math.min(S.activity.length, 60);
-    renderActivity(true);
-  });
-  on('scene', () => refresh('/api/scenes', 'scenes', renderScenes));
-  on('automations', () => refresh('/api/automations', 'automations', renderAutomations));
-  on('automation', () => refresh('/api/automations', 'automations', renderAutomations));
-  on('door', (d) => {
-    S.door = d.state;
-    renderSecurity();
-  });
-  on('ac', (d) => {
-    S.ac = d.state;
-    renderClimate();
-  });
-  on('lights', () => refresh('/api/lights', 'lights', renderLights));
-  on('switches', () => refresh('/api/switches', 'switches', renderSwitches));
-  on('minecraft', () => setTimeout(() => refresh('/api/minecraft', 'minecraft', renderMinecraft), 1500));
-  on('command', () => {});
-  es.onopen = () => setLive(true);
-  es.onerror = () => setLive(false, 'Reconnecting…');
-}
-
-async function refresh(path, key, render) {
-  try {
-    S[key] = await api(path);
-    render();
-  } catch (e) {
-    console.warn(path, e.message);
+      renderAutomations();
+      renderCamera();
+      if (prev.roomName !== S.home.roomName) $('roomName').textContent = S.home.roomName;
+    });
+    cloud.onTable('device_states', (ev) => {
+      if (!ev.new) return;
+      S.devices[ev.new.device] = { ...(ev.new.state || {}), updatedAt: ev.new.updated_at };
+      renderDevice(ev.new.device);
+    });
+    cloud.onTable('activity', (ev) => {
+      if (ev.eventType !== 'INSERT' || !ev.new) return;
+      S.activity.unshift(activityFromRow(ev.new));
+      S.activity.length = Math.min(S.activity.length, 60);
+      renderActivity(true);
+    });
+    cloud.onTable('events', () => refreshVisits());
+    cloud.onPresence((p) => {
+      S.presence = p;
+      renderCamera();
+      renderSecurity();
+      renderAgent();
+      maybeWatch();
+    });
+    cloud.onStatus((st) => {
+      if (st === 'live') setLive(true);
+      else if (st === 'joining') setLive(false, 'Connecting…');
+      else setLive(false, 'Reconnecting…');
+      renderCamera();
+    });
+    cloud.on('frame', showFrame);
+    viewer = new LiveViewer(cloud, {
+      video: $('camVideo'),
+      onState: (st) => {
+        updateWants();
+        renderCamera();
+        if (st === 'failed') {
+          clearTimeout(S.retryTimer);
+          S.retryTimer = setTimeout(() => maybeWatch(), 30000);
+        }
+      },
+    });
+    document.addEventListener('visibilitychange', () => {
+      updateWants();
+      if (!document.hidden) maybeWatch();
+    });
   }
-}
-
-async function refreshCameraStatus() {
-  try {
-    S.camera = await api('/api/camera/status');
-    renderCamera();
-    renderSecurity();
-  } catch {
-    /* transient */
-  }
-}
-
-function applyStatus(s) {
-  S.status = s;
-  S.camera = s.camera;
-  S.ac = s.ac;
-  S.door = s.door;
-  S.lights = s.lights;
-  S.switches = s.switches || [];
-  S.sensors = s.sensors || [];
-  S.scenes = s.scenes || [];
-  S.automations = s.automations || [];
-  S.activity = s.activity || [];
-  S.weather = s.weather;
-  S.minecraft = s.minecraft;
-  S.home = s.home || S.home;
-  S.notify = s.notify;
-  if (!conf.roomName && s.roomName) $('roomName').textContent = s.roomName;
-  const alarm = S.activity.find((e) => e.kind === 'alarm');
-  if (alarm) S.lastAlarmAt = alarm.at;
-  setLive(true);
+  $('roomName').textContent = S.home.roomName || 'My room';
   renderAll();
-  $('serverInfo').textContent = `Home server v${s.version}${s.mock ? ' · mock devices (nothing is wired yet)' : ''}\nPhone alerts: ${s.notify?.enabled ? s.notify.adapter : 'not configured'}`;
   refreshVisits();
+  await cloud.join({ wantsFrames: !document.hidden });
+  renderAgent();
+}
+
+/** Tell the camera whether we need JPEG snapshots (no direct video yet, page visible). */
+function updateWants() {
+  if (!cloud) return;
+  cloud.track({ wantsFrames: !document.hidden && viewer?.state !== 'connected' });
+}
+
+/** Ask the camera for a direct video connection whenever it is running and we have none. */
+function maybeWatch() {
+  if (!viewer || document.hidden) return;
+  const cam = camera();
+  if (!cam || !cam.running) {
+    if (viewer.state !== 'idle') viewer.stop();
+    return;
+  }
+  if (viewer.state === 'idle' || viewer.state === 'failed') viewer.request();
+}
+
+function showFrame(f) {
+  if (!f?.jpeg) return;
+  const img = $('camFrame');
+  img.src = `data:image/jpeg;base64,${f.jpeg}`;
+  S.lastFrameAt = Date.now();
+  renderCamera();
 }
 
 // ---------------------------------------------------------------- renderers
@@ -271,6 +281,34 @@ function renderAll() {
   renderAutomations();
   renderMinecraft();
   renderWeather();
+  renderAgent();
+}
+
+function renderDevice(name) {
+  switch (name) {
+    case 'door':
+      return renderSecurity();
+    case 'ac':
+    case 'sensors':
+      return renderClimate();
+    case 'lights':
+      return renderLights();
+    case 'switches':
+      return renderSwitches();
+    case 'scenes':
+      return renderScenes();
+    case 'automations':
+      return renderAutomations();
+    case 'minecraft':
+      return renderMinecraft();
+    case 'weather':
+      return renderWeather();
+    case 'agent':
+    case 'notify':
+      return renderAgent();
+    default:
+      return null;
+  }
 }
 
 function renderModes() {
@@ -278,66 +316,90 @@ function renderModes() {
   for (const el of document.querySelectorAll('.scene')) el.classList.toggle('active', !!el.dataset.mode && el.dataset.mode === S.home.mode);
 }
 
-function startStream() {
-  const img = $('camStream');
-  img.hidden = false;
-  img.src = withToken('/api/camera/stream') + `&t=${Date.now()}`;
-  img.onerror = () => {
-    img.hidden = true;
-    $('camOffline').classList.remove('hidden');
-    clearTimeout(S.streamRetry);
-    S.streamRetry = setTimeout(startStream, 5000);
-  };
-  img.onload = () => {
-    img.hidden = false;
-    $('camOffline').classList.add('hidden');
-  };
-  $('lnkSnapshot').href = withToken('/api/camera/frame.jpg');
+function renderAgent() {
+  const on = agentOnline();
+  const a = S.presence.agent || dev('agent') || {};
+  const chip = $('chipAgent');
+  chip.className = `chip chip-agent ${on ? 'on' : 'off'}`;
+  chip.innerHTML = `🖥️ <b>${on ? `agent on${a.mock ? ' · demo' : ''}` : 'agent off'}</b>`;
+  chip.title = on ? `Home agent v${a.version || '?'}${a.mock ? ' (mock devices: nothing is wired yet)' : ''}` : 'Start the home agent on your PC: npm run agent';
+  for (const id of AGENT_CARDS) $(id)?.classList.toggle('offline', !on);
+  const notify = dev('notify');
+  $('serverInfo').textContent = [
+    `Signed in as ${cloud?.user?.email || '–'}`,
+    `Cloud project: ${readCloudConfig(CLOUD).url.replace(/^https?:\/\//, '') || '–'}`,
+    `Home agent: ${on ? `online · v${a.version || '?'}${a.mock ? ' · mock devices' : ''}` : 'offline (run "npm run agent" on your PC)'}`,
+    `Camera: ${camera() ? (camera().running ? 'running' : 'app open, camera off') : 'offline'}`,
+    `Phone alerts: ${notify?.enabled ? notify.adapter : 'not configured (server/config.json → notify)'}`,
+  ].join('\n');
+  $('btnCloudReset').classList.toggle('hidden', readCloudConfig(CLOUD).source !== 'local');
 }
 
 function renderCamera() {
-  const c = S.camera || {};
-  const p = c.presence || {};
-  const online = !!c.online;
-  const people = p.people || 0;
+  const cam = camera();
+  const online = !!cam && !!cam.running;
+  const people = online ? cam.people || 0 : 0;
+  const video = $('camVideo');
+  const frame = $('camFrame');
+  const direct = viewer?.state === 'connected';
+  const freshFrame = Date.now() - S.lastFrameAt < 8000 && !!frame.src;
+  video.hidden = !direct;
+  frame.hidden = direct || !freshFrame;
+  const showOffline = !direct && !freshFrame;
+  $('camOffline').classList.toggle('hidden', !showOffline);
+  if (showOffline) {
+    $('camOfflineTitle').textContent = !cam ? 'Camera app is not open' : !cam.running ? 'Camera is off' : viewer?.state === 'connecting' ? 'Connecting to the camera…' : 'Waiting for the picture…';
+    $('camOfflineHint').textContent = !cam
+      ? 'Open the camera app on the iPad, sign in with the same account and press Start camera.'
+      : !cam.running
+        ? 'Press "Start camera" here or on the iPad.'
+        : 'The first picture takes a few seconds.';
+  }
+  const q = $('camQuality');
+  q.hidden = showOffline;
+  q.textContent = direct ? 'direct · live' : 'snapshots';
+  $('btnCamStart').textContent = online ? 'Stop camera' : 'Start camera';
+  $('btnCamStart').disabled = !cam;
   const peopleEl = $('camPeople');
-  peopleEl.textContent = !online ? 'Camera offline' : people ? `${people} ${people === 1 ? 'person' : 'people'} in the room` : 'Nobody in the room';
+  peopleEl.textContent = !online ? (cam ? 'Camera off' : 'Camera offline') : people ? `${people} ${people === 1 ? 'person' : 'people'} in the room` : 'Nobody in the room';
   peopleEl.className = `chip chip-dark ${people ? 'people' : ''}`;
-  $('camArmed').textContent = p.armed ? 'Armed' : 'Disarmed';
-  $('camArmed').className = `chip chip-dark ${p.armed ? 'armed' : ''}`;
-  $('camRec').classList.toggle('hidden', !p.recording);
-  $('camMeta').textContent = online ? `Live · ${p.mode === 'identify' ? 'identifying people' : 'recording every visit'}` : 'Waiting for the camera app';
-  if (!online && !$('camStream').naturalWidth) $('camOffline').classList.remove('hidden');
-  const sub = !online ? 'Camera offline' : people ? `Occupied${c.occupiedSince ? ` for ${fmtDuration(Date.now() - c.occupiedSince)}` : ''}` : `Empty${c.emptySince ? ` since ${fmtTime(c.emptySince)}` : ''}`;
-  $('roomSub').textContent = `${sub}${S.home.mode ? ` · ${S.home.mode} mode` : ''}`;
-  $('camSince').textContent = people && c.occupiedSince ? `in view ${fmtDuration(Date.now() - c.occupiedSince)}` : '';
-  $('secVisitsToday').textContent = c.visitsToday ?? 0;
-  $('visitsToday').textContent = c.visitsToday != null ? `${c.visitsToday} today` : '';
-  if (c.lastVisit) $('secLastVisit').textContent = ago(c.lastVisit.startedAt);
+  const armed = S.home.armed;
+  $('camArmed').textContent = armed ? 'Armed' : 'Disarmed';
+  $('camArmed').className = `chip chip-dark ${armed ? 'armed' : ''}`;
+  $('camRec').classList.toggle('hidden', !(online && cam.recording));
+  $('camMeta').textContent = online ? `Live · ${cam.mode === 'identify' ? 'identifying people' : 'recording every visit'}${cam.viewers ? ` · ${cam.viewers} watching` : ''}` : cam ? 'Camera app open, camera off' : 'Waiting for the camera app';
+  const since = people ? Math.min(...(cam.tracks || []).map((t) => t.since || Date.now())) : null;
+  const sub = !online ? (cam ? 'Camera off' : 'Camera offline') : people ? `Occupied${since ? ` for ${fmtDuration(Date.now() - since)}` : ''}` : `Empty${cam.emptySince ? ` since ${fmtTime(cam.emptySince)}` : ''}`;
+  if (S.connected) $('roomSub').textContent = `${sub}${S.home.mode ? ` · ${S.home.mode} mode` : ''}`;
+  $('camSince').textContent = people && since ? `in view ${fmtDuration(Date.now() - since)}` : '';
+  $('secVisitsToday').textContent = S.visitsToday ?? 0;
+  $('visitsToday').textContent = `${S.visitsToday ?? 0} today`;
+  if (S.visits[0]) $('secLastVisit').textContent = ago(S.visits[0].startedAt);
 }
 
 function renderSecurity() {
-  const p = S.camera?.presence || {};
+  const armed = S.home.armed;
+  const alarm = S.home.alarm;
   const ring = $('secRing');
-  const alarm = S.alarmActive || p.alarm;
-  ring.className = `ring ${alarm ? 'alarm' : p.armed ? 'armed' : ''}`;
-  $('secIcon').textContent = alarm ? '🚨' : p.armed ? '🔒' : '🛡️';
-  $('secText').textContent = alarm ? 'ALARM' : p.armed ? 'Armed' : 'Secure';
+  ring.className = `ring ${alarm ? 'alarm' : armed ? 'armed' : ''}`;
+  $('secIcon').textContent = alarm ? '🚨' : armed ? '🔒' : '🛡️';
+  $('secText').textContent = alarm ? 'ALARM' : armed ? 'Armed' : 'Secure';
   $('alarmStrip').classList.toggle('hidden', !alarm);
-  $('btnArm').classList.toggle('accent', !p.armed);
-  $('btnDisarm').classList.toggle('accent', !!p.armed);
-  $('secLastAlarm').textContent = S.lastAlarmAt ? ago(S.lastAlarmAt) : 'never';
-  const d = S.door;
+  $('btnArm').classList.toggle('accent', !armed);
+  $('btnDisarm').classList.toggle('accent', !!armed);
+  const lastAlarm = S.home.alarmAt || S.activity.find((e) => e.kind === 'alarm')?.at;
+  $('secLastAlarm').textContent = lastAlarm ? ago(lastAlarm) : 'never';
+  const d = dev('door');
   const btn = $('btnDoor');
-  if (!d || d.enabled === false) {
+  if (!d || d.enabled === false || d.adapter === 'none') {
     $('doorState').textContent = 'Door switch not set up';
-    $('doorNote').textContent = 'configure door.adapter on the server';
+    $('doorNote').textContent = agentOnline() ? 'configure door.adapter in server/config.json' : 'home agent offline';
     $('doorIcon').textContent = '🚪';
     btn.classList.remove('open');
     btn.disabled = true;
     return;
   }
-  btn.disabled = false;
+  btn.disabled = !agentOnline();
   if (d.error) {
     $('doorState').textContent = 'Door switch error';
     $('doorNote').textContent = d.error;
@@ -351,20 +413,23 @@ function renderSecurity() {
 }
 
 function renderScenes() {
-  if (!changed('scenes', S.scenes)) return;
-  $('sceneRow').innerHTML = S.scenes
-    .map((s) => `<button type="button" class="scene" data-scene="${esc(s.id)}" ${s.mode ? `data-mode="${esc(s.mode)}"` : ''}><span class="ico">${esc(s.icon)}</span><span class="nm">${esc(s.name)}</span><span class="last">${s.lastRun ? `ran ${ago(s.lastRun)}` : `${s.actions} steps`}</span></button>`)
-    .join('');
+  const list = dev('scenes')?.list || [];
+  if (!changed('scenes', list)) return;
+  $('sceneRow').innerHTML = list.length
+    ? list
+        .map((s) => `<button type="button" class="scene" data-scene="${esc(s.id)}" ${s.mode ? `data-mode="${esc(s.mode)}"` : ''}><span class="ico">${esc(s.icon)}</span><span class="nm">${esc(s.name)}</span><span class="last">${s.lastRun ? `ran ${ago(s.lastRun)}` : `${s.actions} steps`}</span></button>`)
+        .join('')
+    : '<p class="muted small">Scenes appear once the home agent has run on your PC.</p>';
   renderModes();
 }
 
 function renderClimate() {
-  const ac = S.ac;
+  const ac = dev('ac');
   const badge = $('acState');
   if (!ac || ac.enabled === false || ac.adapter === 'none') {
     badge.textContent = 'Not set up';
     badge.className = 'badge';
-    $('acNote').textContent = 'Configure ac.adapter on the server (Sensibo, Home Assistant or webhooks).';
+    $('acNote').textContent = 'Configure ac.adapter in server/config.json (Sensibo, Home Assistant or webhooks).';
   } else if (ac.error) {
     badge.textContent = 'Error';
     badge.className = 'badge danger';
@@ -379,12 +444,12 @@ function renderClimate() {
     if (ac.fanLevel) $('acFan').value = ['auto', 'low', 'medium', 'high'].includes(ac.fanLevel) ? ac.fanLevel : 'auto';
     $('acNote').textContent = ac.room ? `${ac.room} · ${ac.adapter}` : '';
   }
-  // inside chip + sensors
-  const temp = S.sensors.find((x) => x.kind === 'temperature')?.value ?? ac?.currentTemp ?? null;
-  const hum = S.sensors.find((x) => x.kind === 'humidity')?.value ?? ac?.humidity ?? null;
+  const sensors = dev('sensors')?.list || [];
+  const temp = sensors.find((x) => x.kind === 'temperature')?.value ?? ac?.currentTemp ?? null;
+  const hum = sensors.find((x) => x.kind === 'humidity')?.value ?? ac?.humidity ?? null;
   $('chipInside').innerHTML = `🌡️ <b>${temp != null ? `${Number(temp).toFixed(1)}°` : '–'}</b>${hum != null ? ` · ${Math.round(hum)}%` : ''}`;
-  if (changed('sensors', S.sensors)) {
-    $('sensorRow').innerHTML = S.sensors
+  if (changed('sensors', sensors)) {
+    $('sensorRow').innerHTML = sensors
       .map((s) => `<div class="sensor"><b>${s.value != null ? `${s.value}${esc(s.unit || '')}` : '–'}</b><small>${esc(s.name)}</small></div>`)
       .join('');
   }
@@ -394,10 +459,10 @@ const rgbHex = (c) => (c ? `#${[c.r, c.g, c.b].map((v) => Math.max(0, Math.min(2
 const hexRgb = (h) => ({ r: parseInt(h.slice(1, 3), 16), g: parseInt(h.slice(3, 5), 16), b: parseInt(h.slice(5, 7), 16) });
 
 function renderLights() {
-  const l = S.lights;
+  const l = dev('lights');
   const list = $('lightList');
   if (!l || l.enabled === false) {
-    list.innerHTML = '<p class="muted small">Add your Govee API key on the server (govee.apiKey). Get it in the Govee Home app under Settings → Apply for API key.</p>';
+    list.innerHTML = '<p class="muted small">Add your Govee API key in server/config.json (govee.apiKey). Get it in the Govee Home app under Settings → Apply for API key.</p>';
     return;
   }
   if (l.error) {
@@ -405,7 +470,7 @@ function renderLights() {
     return;
   }
   if (!changed('lights', l.devices)) return;
-  list.innerHTML = l.devices
+  list.innerHTML = (l.devices || [])
     .map((d) => {
       const s = d.state || {};
       return `<div class="light ${s.power ? '' : 'off'}" data-device="${esc(d.device)}">
@@ -420,34 +485,40 @@ function renderLights() {
 
 function renderSwitches() {
   const list = $('switchList');
-  if (!S.switches.length) {
-    list.innerHTML = '<p class="muted small">Add plugs and switches under "switches" in the server config (Shelly, Tasmota, Home Assistant or webhooks).</p>';
+  const switches = dev('switches')?.list || [];
+  if (!switches.length) {
+    list.innerHTML = '<p class="muted small">Add plugs and switches under "switches" in server/config.json (Shelly, Tasmota, Home Assistant or webhooks).</p>';
     return;
   }
-  if (!changed('switches', S.switches)) return;
-  list.innerHTML = S.switches
+  if (!changed('switches', switches)) return;
+  list.innerHTML = switches
     .map((sw) => `<div class="sw ${sw.on ? '' : 'off'}" data-switch="${esc(sw.id)}"><div class="row1"><span class="name"><span class="ico">${esc(sw.icon)}</span>${esc(sw.name)}${sw.error ? `<small class="muted"> · ${esc(sw.error)}</small>` : ''}</span><button type="button" class="switch ${sw.on ? 'on' : ''}" data-action="${sw.on ? 'off' : 'on'}" aria-label="toggle"></button></div></div>`)
     .join('');
 }
 
 async function refreshVisits() {
   try {
-    const events = await api('/api/camera/events?limit=8');
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const [events, count] = await Promise.all([cloud.listEvents(8), cloud.countEventsSince(todayStart.toISOString())]);
     S.visits = events;
+    S.visitsToday = count;
+    renderCamera();
     if (!changed('visits', events)) return;
     const list = $('visitList');
     if (!events.length) {
       list.innerHTML = '<li class="muted small">No visits yet. The camera logs everyone who enters, with a snapshot and clip.</li>';
       return;
     }
+    const urls = await Promise.all(events.map(async (e) => ({ snap: e.snapshotPath ? await cloud.mediaUrl(e.snapshotPath).catch(() => null) : null, clips: await Promise.all((e.clipPaths?.length ? e.clipPaths : e.clipPath ? [e.clipPath] : []).map((p) => cloud.mediaUrl(p).catch(() => null))) })));
     list.innerHTML = events
-      .map((e) => {
-        const parts = e.clipPaths?.length ? e.clipPaths : e.clipPath ? [e.clipPath] : [];
+      .map((e, i) => {
         const dur = e.endedAt ? fmtDuration(new Date(e.endedAt) - new Date(e.startedAt)) : 'now';
+        const u = urls[i];
         return `<li>
-          ${e.snapshotPath ? `<img src="${withToken(`/api/camera/media/${e.snapshotPath}`)}" alt="" loading="lazy">` : '<div class="no-thumb">no snapshot</div>'}
+          ${u.snap ? `<img src="${esc(u.snap)}" alt="" loading="lazy">` : '<div class="no-thumb">no snapshot</div>'}
           <div class="when"><b>${e.personName ? esc(e.personName) : 'Someone'}</b>${e.alarmTriggered ? '<span class="tag alarm">alarm</span>' : ''}<small>${esc(fmtDay(e.startedAt))} ${esc(fmtTime(e.startedAt))} · ${dur}</small>${e.features?.ai?.summary ? `<small>${esc(e.features.ai.summary)}</small>` : ''}</div>
-          <div>${parts.map((p, i) => `<a class="pill small" href="${withToken(`/api/camera/media/${p}`)}" target="_blank" rel="noopener">▶${parts.length > 1 ? ` ${i + 1}` : ''}</a>`).join(' ')}</div>
+          <div>${u.clips.filter(Boolean).map((url, k) => `<a class="pill small" href="${esc(url)}" target="_blank" rel="noopener">▶${u.clips.length > 1 ? ` ${k + 1}` : ''}</a>`).join(' ')}</div>
         </li>`;
       })
       .join('');
@@ -469,15 +540,24 @@ function renderActivity(flash = false) {
     .join('');
 }
 
+/** Built-in rules from the agent, with the enabled flags the dashboard saved in the home row. */
+function automationList() {
+  const base = dev('automations')?.list || [];
+  return base.map((a) => ({ ...a, enabled: S.home.automations?.[a.id]?.enabled ?? a.enabled }));
+}
+
 function renderAutomations() {
-  if (!changed('automations', S.automations)) return;
-  $('automationList').innerHTML = S.automations
-    .map((a) => `<div class="auto" data-automation="${esc(a.id)}"><span class="ico">${esc(a.icon)}</span><div class="txt"><b>${esc(a.name)}</b><small>${esc(a.description || '')}${a.lastFired ? ` · last ${ago(a.lastFired)}` : ''}</small></div><button type="button" class="run" data-run>Run</button><button type="button" class="switch ${a.enabled ? 'on' : ''}" data-enabled="${a.enabled ? '0' : '1'}" aria-label="enabled"></button></div>`)
-    .join('');
+  const list = automationList();
+  if (!changed('automations', list)) return;
+  $('automationList').innerHTML = list.length
+    ? list
+        .map((a) => `<div class="auto" data-automation="${esc(a.id)}"><span class="ico">${esc(a.icon)}</span><div class="txt"><b>${esc(a.name)}</b><small>${esc(a.description || '')}${a.lastFired ? ` · last ${ago(a.lastFired)}` : ''}</small></div><button type="button" class="run" data-run>Run</button><button type="button" class="switch ${a.enabled ? 'on' : ''}" data-enabled="${a.enabled ? '0' : '1'}" aria-label="enabled"></button></div>`)
+        .join('')
+    : '<p class="muted small">Automations appear once the home agent has run on your PC.</p>';
 }
 
 function renderMinecraft() {
-  const mc = S.minecraft;
+  const mc = dev('minecraft');
   const badge = $('mcState');
   if (!mc || mc.enabled === false) {
     badge.textContent = 'Disabled';
@@ -498,11 +578,11 @@ function renderMinecraft() {
 }
 
 function renderWeather() {
-  const w = S.weather;
+  const w = dev('weather');
   if (!w || w.enabled === false || w.error) {
     $('chipWeather').innerHTML = `⛅ <b>–</b>`;
     $('weatherTemp').textContent = '–';
-    $('weatherDesc').textContent = w?.error ? w.error : 'Set location.lat / location.lon on the server for outdoor weather.';
+    $('weatherDesc').textContent = w?.error ? w.error : 'Set location.lat / location.lon in server/config.json for outdoor weather.';
     $('weatherFacts').textContent = '';
     return;
   }
@@ -516,60 +596,94 @@ function renderWeather() {
 }
 
 // ---------------------------------------------------------------- actions
+const agent = (action, params = {}) => cloud.command('agent', action, params, { timeout: 12000 });
+
 async function setMode(mode) {
   const prev = S.home.mode;
   S.home = { ...S.home, mode };
   renderModes();
-  const r = await act(null, () => api('/api/mode', { method: 'POST', body: { mode } }));
+  const r = await act(null, async () => {
+    await cloud.setHome({ mode });
+    await cloud.addActivity('mode', `Mode set to ${mode}`, { source: 'dashboard' });
+    return true;
+  });
   if (!r) {
     S.home = { ...S.home, mode: prev };
     renderModes();
   }
 }
 
+async function setArmed(armed) {
+  await act('cardCamera', async () => {
+    await cloud.setHome({ armed });
+    await cloud.addActivity('security', armed ? '🔒 Camera armed from the dashboard' : '🔓 Camera disarmed from the dashboard', { source: 'dashboard' });
+    toast(armed ? 'Armed' : 'Disarmed');
+  });
+}
+
 async function runScene(id) {
-  const r = await act('cardScenes', () => api(`/api/scenes/${encodeURIComponent(id)}/run`, { method: 'POST' }));
+  const r = await act('cardScenes', () => agent('scene', { id }));
   if (r) toast(r.failed ? `${r.name}: ${r.failed} step${r.failed > 1 ? 's' : ''} skipped (device not set up)` : `${r.name} ✓`);
 }
 
 async function setAc(changes) {
-  const r = await act('cardClimate', () => api('/api/ac', { method: 'POST', body: changes }));
-  if (r) {
-    S.ac = r;
+  const r = await act('cardClimate', () => agent('ac', { changes }));
+  if (r?.state) {
+    S.devices.ac = { ...(S.devices.ac || {}), ...r.state };
     renderClimate();
   }
 }
 
 async function setDoor(action) {
-  const r = await act('cardSecurity', () => api('/api/door', { method: 'POST', body: { action } }));
-  if (r) {
-    S.door = r;
+  const r = await act('cardSecurity', () => agent('door', { action }));
+  if (r?.state) {
+    S.devices.door = { ...(S.devices.door || {}), ...r.state };
     renderSecurity();
   }
 }
 
 async function setLight(device, changes) {
-  await act('cardLights', async () => {
-    await api(`/api/lights/${encodeURIComponent(device)}`, { method: 'POST', body: changes });
-    await refresh('/api/lights', 'lights', renderLights);
-  });
+  await act('cardLights', () => agent('light', { device, changes }));
 }
 
 async function setSwitch(id, action) {
-  const r = await act('cardSwitches', () => api(`/api/switches/${encodeURIComponent(id)}`, { method: 'POST', body: { action } }));
-  if (r) {
-    S.switches = S.switches.map((s) => (s.id === r.id ? r : s));
+  const r = await act('cardSwitches', () => agent('switch', { id, action }));
+  if (r?.state) {
+    const list = (S.devices.switches?.list || []).map((s) => (s.id === r.state.id ? r.state : s));
+    S.devices.switches = { ...(S.devices.switches || {}), list };
     renderSwitches();
   }
 }
 
+function snapshot() {
+  const video = $('camVideo');
+  const frame = $('camFrame');
+  const canvas = document.createElement('canvas');
+  let w = 0;
+  let h = 0;
+  if (!video.hidden && video.videoWidth) {
+    w = video.videoWidth;
+    h = video.videoHeight;
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+  } else if (!frame.hidden && frame.naturalWidth) {
+    w = frame.naturalWidth;
+    h = frame.naturalHeight;
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext('2d').drawImage(frame, 0, 0, w, h);
+  } else return toast('No picture to save yet', 'error');
+  const a = document.createElement('a');
+  a.href = canvas.toDataURL('image/jpeg', 0.9);
+  a.download = `room-${new Date().toISOString().replace(/[:.]/g, '-')}.jpg`;
+  a.click();
+}
+
 // ---------------------------------------------------------------- sheet
 function openSheet() {
-  const f = $('connForm');
-  f.elements.serverUrl.value = conf.serverUrl;
-  f.elements.token.value = conf.token;
-  f.elements.cameraUrl.value = conf.cameraUrl;
-  f.elements.roomName.value = conf.roomName;
+  $('roomForm').elements.roomName.value = S.home.roomName || '';
+  renderAgent();
   $('sheet').classList.add('open');
   $('sheet').setAttribute('aria-hidden', 'false');
 }
@@ -580,49 +694,56 @@ function closeSheet() {
 
 // ---------------------------------------------------------------- bind
 function bind() {
+  $('gateForm').addEventListener('submit', gateSubmit);
   $('btnSettings').addEventListener('click', openSheet);
   $('btnSheetClose').addEventListener('click', closeSheet);
   $('sheet').addEventListener('click', (e) => {
     if (e.target === $('sheet')) closeSheet();
   });
-  $('connForm').addEventListener('submit', (e) => {
+  $('roomForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const f = e.target;
-    conf.serverUrl = f.elements.serverUrl.value.trim();
-    conf.token = f.elements.token.value.trim();
-    conf.cameraUrl = f.elements.cameraUrl.value.trim();
-    conf.roomName = f.elements.roomName.value.trim();
-    saveConf();
+    const roomName = e.target.elements.roomName.value.trim() || 'My room';
+    await act(null, () => cloud.setHome({ roomName }));
+    $('roomName').textContent = roomName;
     closeSheet();
-    $('lnkCameraApp').href = conf.cameraUrl || 'index.html';
-    connect();
+  });
+  $('btnSignOut').addEventListener('click', async () => {
+    viewer?.stop();
+    await cloud?.signOut().catch(() => {});
+    showGate();
+  });
+  $('btnCloudReset').addEventListener('click', async () => {
+    if (!confirm('Forget the cloud project saved on this device? You will be asked for the URL and key again.')) return;
+    viewer?.stop();
+    await cloud?.signOut().catch(() => {});
+    clearCloudConfig();
+    location.reload();
   });
   $('modes').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-mode]');
     if (b) setMode(b.dataset.mode);
   });
-  $('btnArm').addEventListener('click', () => act('cardCamera', () => api('/api/camera/command', { method: 'POST', body: { action: 'arm' } }).then(() => toast('Arming the camera'))));
-  $('btnDisarm').addEventListener('click', () => act('cardCamera', () => api('/api/camera/command', { method: 'POST', body: { action: 'disarm' } }).then(() => toast('Disarming the camera'))));
-  $('btnSiren').addEventListener('click', () => act('cardSecurity', () => api('/api/camera/command', { method: 'POST', body: { action: 'siren' } }).then(() => toast('Siren test sent to the camera'))));
-  $('btnNotifyTest').addEventListener('click', () => act('cardSecurity', () => api('/api/notify', { method: 'POST', body: { title: 'Home', message: 'Test alert from your dashboard' } }).then((r) => toast(`Sent via ${r.adapter}`))));
+  $('btnArm').addEventListener('click', () => setArmed(true));
+  $('btnDisarm').addEventListener('click', () => setArmed(false));
+  $('btnCamStart').addEventListener('click', () => act('cardCamera', () => cloud.command('camera', camera()?.running ? 'stop' : 'start').then(() => toast(camera()?.running ? 'Stopping the camera' : 'Starting the camera'))));
+  $('btnSnapshot').addEventListener('click', snapshot);
+  $('btnSiren').addEventListener('click', () => act('cardSecurity', () => cloud.command('camera', 'siren').then(() => toast('Siren test sent to the camera'))));
+  $('btnNotifyTest').addEventListener('click', () => act('cardSecurity', () => agent('notify', { title: 'Home', message: 'Test alert from your dashboard' }).then((r) => toast(`Sent via ${r.adapter}`))));
   for (const b of document.querySelectorAll('[data-door]')) b.addEventListener('click', () => setDoor(b.dataset.door));
   $('sceneRow').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-scene]');
     if (b) runScene(b.dataset.scene);
   });
-  $('acUp').addEventListener('click', () => setAc({ targetTemp: (S.ac?.targetTemp ?? 23) + 1 }));
-  $('acDown').addEventListener('click', () => setAc({ targetTemp: (S.ac?.targetTemp ?? 23) - 1 }));
-  $('acPower').addEventListener('click', () => setAc({ power: !S.ac?.power }));
+  $('acUp').addEventListener('click', () => setAc({ targetTemp: (dev('ac')?.targetTemp ?? 23) + 1 }));
+  $('acDown').addEventListener('click', () => setAc({ targetTemp: (dev('ac')?.targetTemp ?? 23) - 1 }));
+  $('acPower').addEventListener('click', () => setAc({ power: !dev('ac')?.power }));
   $('acModes').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-mode]');
     if (b) setAc({ mode: b.dataset.mode, power: true });
   });
   $('acFan').addEventListener('change', (e) => setAc({ fanLevel: e.target.value }));
   for (const b of document.querySelectorAll('button[data-all]')) {
-    b.addEventListener('click', () => act('cardLights', async () => {
-      await api('/api/lights/all', { method: 'POST', body: { power: b.dataset.all === 'on' } });
-      await refresh('/api/lights', 'lights', renderLights);
-    }));
+    b.addEventListener('click', () => act('cardLights', () => agent('lights.all', { changes: { power: b.dataset.all === 'on' } })));
   }
   $('lightList').addEventListener('click', (e) => {
     const sw = e.target.closest('button[data-power]');
@@ -637,10 +758,7 @@ function bind() {
     if (e.target.matches('[data-color]')) setLight(card.dataset.device, { color: hexRgb(e.target.value), power: true });
   });
   for (const b of document.querySelectorAll('button[data-sw-all]')) {
-    b.addEventListener('click', () => act('cardSwitches', async () => {
-      await api('/api/switches/all', { method: 'POST', body: { action: b.dataset.swAll } });
-      await refresh('/api/switches', 'switches', renderSwitches);
-    }));
+    b.addEventListener('click', () => act('cardSwitches', () => agent('switches.all', { action: b.dataset.swAll })));
   }
   $('switchList').addEventListener('click', (e) => {
     const sw = e.target.closest('button[data-action]');
@@ -652,22 +770,23 @@ function bind() {
     const row = e.target.closest('.auto');
     if (!row) return;
     const id = row.dataset.automation;
-    if (e.target.closest('[data-run]')) act('cardAutomations', () => api(`/api/automations/${encodeURIComponent(id)}/run`, { method: 'POST' }).then((r) => toast(r.failed ? `${r.failed} step(s) skipped` : 'Automation ran ✓')));
+    if (e.target.closest('[data-run]')) act('cardAutomations', () => agent('automation.run', { id }).then((r) => toast(r.failed ? `${r.failed} step(s) skipped` : 'Automation ran ✓')));
     const sw = e.target.closest('button[data-enabled]');
     if (sw) {
       sw.classList.toggle('on');
+      const enabled = sw.dataset.enabled === '1';
       act('cardAutomations', async () => {
-        await api(`/api/automations/${encodeURIComponent(id)}`, { method: 'POST', body: { enabled: sw.dataset.enabled === '1' } });
-        await refresh('/api/automations', 'automations', renderAutomations);
+        await cloud.setHome({ automations: { ...(S.home.automations || {}), [id]: { enabled } } });
+        const a = automationList().find((x) => x.id === id);
+        await cloud.addActivity('automation', `${a?.icon || '⚙️'} "${a?.name || id}" ${enabled ? 'enabled' : 'disabled'}`, { source: 'dashboard', automation: id });
       });
     }
   });
   for (const b of document.querySelectorAll('button[data-mc]')) {
     b.addEventListener('click', () => act('cardMinecraft', async () => {
-      const out = await api(`/api/minecraft/${b.dataset.mc}`, { method: 'POST' });
+      const out = await agent('minecraft', { action: b.dataset.mc });
       $('rconOut').textContent = out.stdout || `${b.dataset.mc}: ok`;
       $('rconForm').classList.remove('hidden');
-      setTimeout(() => refresh('/api/minecraft', 'minecraft', renderMinecraft), 1500);
     }));
   }
   $('btnConsole').addEventListener('click', () => $('rconForm').classList.toggle('hidden'));
@@ -676,7 +795,7 @@ function bind() {
     const command = $('rconInput').value.trim();
     if (!command) return;
     act('cardMinecraft', async () => {
-      const out = await api('/api/minecraft/rcon', { method: 'POST', body: { command } });
+      const out = await agent('minecraft.rcon', { command });
       $('rconOut').textContent = `> ${command}\n${out.output || '(no output)'}`;
       $('rconInput').value = '';
     });
@@ -687,19 +806,10 @@ function bind() {
     const now = new Date();
     $('clock').textContent = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     $('dateLine').textContent = fmtDay(now);
-    if (S.camera) renderCamera();
+    if (cloud?.user) renderCamera();
   }, 1000);
-  // things the server polls itself (cloud lights, Minecraft, sensors, weather)
-  setInterval(() => {
-    if (!S.connected) return;
-    refresh('/api/minecraft', 'minecraft', renderMinecraft);
-    refresh('/api/lights', 'lights', renderLights);
-    refresh('/api/sensors', 'sensors', renderClimate);
-  }, 30000);
-  setInterval(() => S.connected && refresh('/api/weather', 'weather', renderWeather), 10 * 60 * 1000);
-  $('lnkCameraApp').href = conf.cameraUrl || 'index.html';
 }
 
 bind();
-connect();
-window.homeDash = { S, conf, api, connect };
+boot();
+window.homeDash = { S, get cloud() { return cloud; }, get viewer() { return viewer; }, enter };

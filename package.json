@@ -1,18 +1,26 @@
 {
   "name": "human-recognition-v1",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Browser-based bedroom camera that records every visit, plus a small home server and dashboard for the camera feed, Minecraft server, AC, door switch and Govee lights.",
+  "description": "Browser-based bedroom camera that records every visit, a smart-room dashboard, and a home agent for the door switch, AC, Govee lights, plugs and Minecraft server. All three share one cloud sign-in.",
   "type": "module",
   "scripts": {
     "test": "node --test tests/unit/*.test.js server/test/*.test.js",
     "test:e2e": "node tests/e2e/smoke.mjs",
+    "test:e2e:cloud": "node tests/e2e/cloud.mjs",
     "serve": "node tests/e2e/serve.mjs",
+    "agent": "node server/agent.js",
+    "agent:mock": "node server/agent.js --mock",
     "server": "node server/index.js",
-    "server:mock": "node server/index.js --mock",
-    "test:e2e:dashboard": "node tests/e2e/dashboard.mjs"
+    "server:mock": "node server/index.js --mock"
   },
   "devDependencies": {
     "playwright": "^1.50.0"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.116.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

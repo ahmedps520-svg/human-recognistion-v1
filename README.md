@@ -5,11 +5,15 @@ the room it records the visit from the moment they are seen until they
 leave, keeps a snapshot and the clip, and can sound an alarm when armed.
 Optionally it can also work out who the person is.
 
-Version 1 is a static site meant for **GitHub Pages**. For now everything it
-records (visits, clips, settings) stays in the browser that runs the camera;
-cloud sync with **Supabase** is built in but optional and off by default. No
-server of your own is needed: the machine learning runs on-device inside the
-browser tab that has the camera.
+It is a static site on **GitHub Pages**, so the whole thing is one link:
+<https://ahmedps520-svg.github.io/human-recognistion-v1/> (camera app) and
+the same link ending in `dashboard.html` (smart-room dashboard). One sign-in
+with email + password connects the camera on the iPad, the dashboard on any
+phone or laptop and the **home agent** on the PC that drives the real
+devices. They meet in a small free Supabase project that only you can read
+([docs/CLOUD-SETUP.md](docs/CLOUD-SETUP.md), ten minutes, once). The machine
+learning runs on-device inside the browser tab that has the camera. Without
+signing in the camera app still works on its own from browser storage.
 
 > **Status:** v1. Visit recording, alarms and the optional identification
 > mode all work end to end, but height estimation is *approximate* and
@@ -72,10 +76,15 @@ your camera, your room and your family over time.
 - Arm / disarm, configurable thresholds, backup export / import, clip downloads.
 - Optional Claude vision assistant: a plain-language description of every
   visit and an attribute-based second opinion when the camera is unsure.
-- Optional home server + dashboard: live feed, visit log, Minecraft server,
-  AC, door switch and Govee lights in one place, with remote arm/disarm.
+- Smart-room dashboard on the same site: live picture (device-to-device
+  video), who is in the room, arm/disarm, door lock, modes, scenes,
+  automations, climate, Govee lights, plugs, Minecraft server, weather,
+  activity timeline, all updating live.
+- Home agent for the PC: drives the devices, runs scenes and automations
+  (intruder response: lights red, door locked, phone alert) and signs in
+  with the same account. No ports, tokens or addresses.
 - Works offline after the first load (models are cached by the browser);
-  Claude is the only feature that needs the internet.
+  the cloud link and Claude are the only features that need the internet.
 
 ## Setup
 
@@ -92,20 +101,21 @@ The site is plain HTML/JS with no build step.
 
 You can also run it locally with `npm run serve` and open `http://localhost:8080`.
 
-### 2. Where your data lives (for now: in the browser)
+### 2. Sign in (or not)
 
-Everything is stored in the browser you run the camera in: people, events
-and settings in localStorage, clips and snapshots in IndexedDB. Nothing is
-uploaded anywhere. Three things follow from that:
+The first screen asks for your email and password. That is the one
+household account from [docs/CLOUD-SETUP.md](docs/CLOUD-SETUP.md); signed in,
+visits and clips go to your cloud project, the dashboard sees the camera, and
+arm/disarm works from anywhere. Until the project is baked into
+`assets/js/config.js`, the sign-in screen has a **First-time setup** box
+where you paste the project URL and anon key once per device.
 
-- Use the same browser profile on the same computer every time; another
-  browser starts empty.
-- When you first start the camera the app asks the browser for *persistent
-  storage* so clips are not evicted when disk space runs low. Settings →
-  Browser storage shows usage and lets you ask again.
-- **Export backup** in Settings saves people, events and settings as a JSON
-  file (import it on a new machine). Clips are downloaded one at a time from
-  the Events tab.
+**Use this device without signing in** keeps everything in the browser you
+run the camera in: people, events and settings in localStorage, clips and
+snapshots in IndexedDB. Nothing is uploaded. Use the same browser profile
+every time, let the app ask for *persistent storage* when the camera starts,
+and **Export backup** in Settings now and then. Clips are downloaded one at
+a time from the Events tab.
 
 ### 3. (Identify mode only) Enroll your family
 
@@ -142,44 +152,44 @@ recognise do.
 
 ### Door lock
 
-The lock integration is a webhook: when the alarm fires the app POSTs
-`{"action":"lock","reason":"unknown person detected","at":"…"}` (optionally
-with a bearer token) to the URL you configure. Point it at a Home Assistant
-webhook automation, a Supabase Edge Function, or a small ESP32/Raspberry Pi
-server driving a servo or a smart lock. The endpoint must allow CORS from your
-Pages origin. Use **Send test lock request** in Settings to verify it.
+Signed in, the alarm reaches the home agent, whose **Intruder response**
+automation locks the door switch, turns the lights red and sends a phone
+alert (ntfy). Without the agent, the camera app can also POST
+`{"action":"lock","reason":"…","at":"…"}` to a webhook of your own (Home
+Assistant, an ESP32 behind a tiny server); set it under Settings → Alarm
+and verify with **Send test lock request**.
 
-## Later: cloud storage with Supabase
+## The cloud link
 
-The Supabase client, schema and sign-in flow are already in the app; they are
-just not needed yet. When you want clips and events off the laptop:
-
-1. Create a project at [supabase.com](https://supabase.com).
-2. Open the SQL editor, paste `supabase/schema.sql`, run it. It creates the
-   `profiles`, `events` and `cameras` tables, the private `clips` storage
-   bucket, and row-level-security policies that allow **authenticated users only**.
-3. Under **Authentication → Users** add yourself (email + password) and under
-   **Authentication → Providers → Email** disable public sign-ups.
-4. In the app's **Settings → Cloud sync** enter the project URL, the anon key,
-   your email and password, then **Save & sign in**. From then on people,
-   events and clips are read from and written to Supabase; the browser copy
-   is kept as an offline cache of people and calibration.
+One Supabase project is the meeting point for the three parts. Durable
+state lives in tables (`home`: mode, armed, alarm; `device_states`:
+everything the agent mirrors; `activity`; `events` + the `clips` bucket).
+Live state goes over one realtime channel: presence (who is online, what
+the camera sees), broadcast commands with replies (dashboard → camera or
+agent), the WebRTC handshake for the live video and JPEG snapshots as a
+fallback. Every table is locked to the signed-in user by row level
+security, so the anon key in the site is harmless on its own.
+[docs/CLOUD-SETUP.md](docs/CLOUD-SETUP.md) has the one-time setup and
+`assets/js/cloud.js` the whole protocol (used unchanged by the browser and
+by the agent in Node).
 
 ## Development
 
 ```
-npm install                 # playwright + pinned browser libraries (already vendored)
-npm test                    # unit tests (camera logic) + home server API tests
+npm install                 # playwright, supabase-js (for the agent); browser libraries are vendored
+npm test                    # unit tests (camera logic, cloud link) + agent and LAN-server tests
 npm run test:e2e            # headless Chromium: fake camera with a photo, both modes
-npm run test:e2e:dashboard  # dashboard against the mock home server
+npm run test:e2e:cloud      # camera app + dashboard + home agent through a fake cloud project
 npm run serve               # local static server on :8080
-npm run server              # home server on :8787 (see server/README.md)
+npm run agent               # home agent (see docs/CLOUD-SETUP.md and server/README.md)
+npm run agent:mock          # home agent with simulated devices
 ```
 
-The end-to-end test downloads the MediaPipe models once into
+The camera end-to-end test downloads the MediaPipe models once into
 `tests/e2e/.cache` and serves the CDN assets from `node_modules`, so it needs
-no internet afterwards. Set `CHROMIUM_PATH` if Playwright's own browser is not
-installed.
+no internet afterwards. The cloud test replaces supabase-js with
+`tests/fake-cloud/` (an in-memory look-alike of the project) so it runs
+offline too. Set `CHROMIUM_PATH` if Playwright's own browser is not installed.
 
 Layout:
 
@@ -190,29 +200,36 @@ assets/js/features.js   body metrics, floor calibration, hair index (pure, unit 
 assets/js/identify.js   scoring, verdicts, temporal tracker (pure, unit tested)
 assets/js/vision.js     MediaPipe + face-api loading and per-frame inference
 assets/js/recorder.js   MediaRecorder clips and snapshots
-assets/js/storage.js    Supabase tables/storage with local fallback (localStorage + IndexedDB)
+assets/js/storage.js    cloud tables/storage when signed in, else localStorage + IndexedDB
+assets/js/cloud.js      the cloud link: sign-in, home row, devices, activity, presence, commands
+assets/js/live.js       device-to-device live video (WebRTC) with snapshot fallback
+assets/js/rows.js       row <-> object mapping shared by browser and agent
 assets/js/alarm.js      siren, notifications, door-lock webhook
 assets/js/app.js        UI and orchestration
 vendor/                 pinned library bundles (see vendor/README.md)
-supabase/schema.sql     tables, RLS policies, storage bucket
-dashboard.html          home dashboard (assets/js/dashboard.js)
-server/                 home server: API, device adapters, mock mode, tests
+supabase/schema.sql     tables, RLS policies, realtime, storage bucket
+dashboard.html          smart-room dashboard (assets/js/dashboard.js)
+server/agent.js         home agent entry point; server/lib/agent.js the core
+server/lib/             device adapters (Govee, Sensibo, Shelly, Tasmota, Home Assistant, webhooks, Minecraft), scenes, automations
+tests/fake-cloud/       Supabase stand-in for tests
 ```
 
-## Home server and dashboard (optional)
+## Dashboard and home agent
 
-`server/` is a dependency-free Node.js process for a computer at home. It
-receives the camera's live feed and visit log, stores clips on disk, and
-serves a **smart-room dashboard** (`dashboard.html`): a dark-glass control
-centre that updates live and shows person detection and the live feed, a
-security panel with the door lock, room modes (Home / Away / Sleep / Guest),
+`dashboard.html` is a dark-glass control centre for the room that updates
+live: the camera picture and who is in the room, a security panel with
+arm/disarm and the door lock, room modes (Home / Away / Sleep / Guest),
 one-tap scenes, automations (schedules, "room empty for N minutes",
-"intruder response"), climate with room sensors, Govee lights, extra plugs
-and switches, the visit log, an activity timeline, outdoor weather, phone
+"intruder response"), climate with room sensors, Govee lights, plugs and
+switches, the visit log, an activity timeline, outdoor weather, phone
 alerts through ntfy or Telegram, and the Minecraft server (status, players,
-start/stop/restart, RCON console). `npm run server:mock` starts it with
-simulated devices so you can use the whole dashboard before anything is
-wired in. Setup, remote access (Tailscale) and the API are described in
+start/stop/restart, RCON console).
+
+The devices are driven by the **home agent**, `npm run agent` on the PC at
+home. It signs in with the same account, mirrors every device into the
+cloud and carries out what you tap on the dashboard; `npm run agent:mock`
+simulates all devices so you can use the whole dashboard before anything is
+wired in. Device configuration is described in
 [server/README.md](server/README.md).
 
 ## Claude vision assistant (optional)
@@ -288,7 +305,7 @@ need. Face descriptors are stored as numbers that cannot be turned back into
 a photo, but snapshots and clips can.
 
 Everything is computed on your device. The only outbound traffic is to your
-Supabase project, your own door-lock webhook, the model/library CDNs on
-first load, and (only if you enable it) one frame per visit to Anthropic's
-API for the Claude assistant. The MediaPipe runtime would also post anonymous usage reports to
+own cloud project, the live video to your own dashboard, your own door-lock
+webhook, the model/library CDNs on first load, and (only if you enable it)
+one frame per visit to Anthropic's API for the Claude assistant. The MediaPipe runtime would also post anonymous usage reports to
 Google; the app blocks those by default (Settings → Performance).

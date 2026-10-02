@@ -5,3 +5,4 @@ tests/e2e/.cache/
 server/config.json
 server/data/
 server/data-mock/
+server/data*/agent-auth.json

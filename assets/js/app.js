@@ -1,7 +1,7 @@
 // Room Guard: wires the camera, the vision models, tracking, identification,
 // recording, alarms and the UI together.
 
-import { APP_VERSION, POSE_EDGES, HAIR_LENGTH_LABELS, HAIR_LENGTH_INDEX, AGE_GROUP_LABELS, AI_MODELS } from './config.js';
+import { APP_VERSION, CLOUD, POSE_EDGES, HAIR_LENGTH_LABELS, HAIR_LENGTH_INDEX, AGE_GROUP_LABELS, AI_MODELS } from './config.js';
 import { loadSettings, saveSettings, LOCAL_KEYS, localGet, localSet, exportLocalData, importLocalData } from './settings.js';
 import { VisionEngine, matchFacesToPoses } from './vision.js';
 import { bodyMetrics, hairMetrics, refineHeadTop, buildObservation, fitCalibration, median } from './features.js';
@@ -10,6 +10,9 @@ import { ClipRecorder, captureSnapshot } from './recorder.js';
 import { Store, clipPathFor } from './storage.js';
 import { Siren, requestNotificationPermission, notify, triggerDoorLock } from './alarm.js';
 import { ClaudeAssistant, rosterFromProfiles, secondOpinion, describePerson } from './ai.js';
+import { Cloud, readCloudConfig, saveCloudConfig, clearCloudConfig } from './cloud.js';
+import { LivePublisher } from './live.js';
+import { homeFromRow } from './rows.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
@@ -60,8 +63,10 @@ const state = {
   enrollPreviewRaf: 0,
   photoCandidates: null,
   wakeLock: null,
-  serverEs: null,
-  serverOk: null,
+  home: null,
+  occupied: false,
+  emptySinceAt: null,
+  gateSkipped: false,
   calib: { collecting: false, samples: [], refHeight: null, fit: null, reason: '' },
   view: 'live',
 };
@@ -155,21 +160,23 @@ function colorFor(identity) {
 
 function updateStoreStatus() {
   const el = els.storeStatus;
-  if (store.isServer) {
-    el.textContent = state.serverOk === false ? (mixedContent() ? 'Home server · blocked (http from https)' : 'Home server · unreachable') : state.serverOk ? 'Home server · live' : 'Home server';
-    el.className = `status-pill ${state.serverOk === false ? 'warn' : 'ok'}`;
-    el.title = state.serverOk === false && mixedContent() ? MIXED_HINT : 'Visits, clips and the live feed go to your home server';
-  } else if (!store.remote) {
+  if (!cloud) {
     el.textContent = 'Browser storage';
     el.className = 'status-pill';
-  } else if (store.user) {
-    el.textContent = `Supabase · ${store.user.email || 'signed in'}`;
-    el.className = 'status-pill ok';
-  } else {
-    el.textContent = 'Supabase · sign in required';
+    el.title = 'Nothing leaves this device. Sign in from Settings → Account to connect the dashboard.';
+  } else if (!cloud.user) {
+    el.textContent = 'Browser storage · not signed in';
     el.className = 'status-pill warn';
+    el.title = 'Sign in to connect this camera to your dashboard';
+  } else {
+    const p = cloud.presence;
+    const watching = p.dashboards.length;
+    const status = cloud.status === 'live' ? 'live' : cloud.status === 'joining' ? 'connecting…' : 'offline';
+    el.textContent = `Cloud · ${status}${watching ? ` · ${watching} watching` : ''}`;
+    el.className = `status-pill ${cloud.status === 'live' ? 'ok' : 'warn'}`;
+    el.title = `Signed in as ${cloud.user.email || 'you'} · home agent ${p.agent ? 'online' : 'offline'} · ${watching} dashboard${watching === 1 ? '' : 's'} open`;
   }
-  if (els.connStatus) els.connStatus.textContent = el.textContent;
+  if (els.accountInfo) renderAccount();
 }
 
 function updateArmedUI() {
@@ -276,6 +283,8 @@ async function startCamera() {
     if (store.mode === 'local') requestPersistentStorage({ quiet: true });
     requestWakeLock();
     log('Camera started');
+    publishPresence([]);
+    live?.refresh();
     requestAnimationFrame(loop);
   } catch (e) {
     console.error(e);
@@ -351,8 +360,9 @@ async function stopCamera() {
   await finalizeRecording();
   releaseWakeLock();
   stopStream();
-  if (framePushPromise) await framePushPromise.catch(() => {}); // let the last frame upload land first
-  await pushPresence({ people: 0, armed: state.armed, recording: false, alarm: false, mode: state.settings.mode, tracks: [] });
+  live?.closeAll();
+  state.occupied = false;
+  publishPresence([]);
   const ctx = els.overlay.getContext('2d');
   ctx.clearRect(0, 0, els.overlay.width, els.overlay.height);
   els.stagePlaceholder.classList.remove('hidden');
@@ -448,7 +458,8 @@ function processFrame(now) {
   handlePresence(active, ended, now);
   draw(detections, active, W, H);
   renderPresence(active);
-  maybePushFrame(now, active);
+  publishPresence(active);
+  maybeSendFrame(now);
 
   state.fps.count += 1;
   if (now - state.fps.since > 1000) {
@@ -467,15 +478,16 @@ function ema(key, ms) {
   t[key] = t[key] ? t[key] * 0.8 + ms * 0.2 : ms;
 }
 
-// ---------------------------------------------------------------- home server link
-const serverConfigured = () => !!(state.settings.serverUrl && state.settings.serverToken);
-const serverBase = () => state.settings.serverUrl.trim().replace(/\/$/, '');
-/** An https page (GitHub Pages) is not allowed to talk to a plain-http server; browsers block it silently. */
-const mixedContent = (url = state.settings.serverUrl) => location.protocol === 'https:' && /^http:\/\//i.test((url || '').trim());
-const MIXED_HINT = 'this page is https, so Safari/Chrome block a plain http server. Open the camera app from the server\'s https address (Tailscale), or use https for the server URL.';
-let framePushAt = 0;
-let framePushBusy = false;
-let framePushPromise = null;
+// ---------------------------------------------------------------- cloud link
+// One sign-in connects this camera to the dashboard and the home agent. The
+// camera publishes what it sees (presence), answers dashboard commands, and
+// streams its picture device-to-device.
+let cloud = null; // Cloud instance when a project is configured
+let live = null; // LivePublisher
+let lastFrameSent = 0;
+let frameBusy = false;
+
+const cloudLive = () => !!cloud && cloud.status === 'live';
 
 function presenceMeta(tracks) {
   return {
@@ -483,130 +495,243 @@ function presenceMeta(tracks) {
     armed: state.armed,
     recording: !!state.session,
     alarm: !!state.alarmActive,
+    running: state.running,
     mode: state.settings.mode,
-    tracks: tracks.map((tr) => ({ id: tr.id, label: labelFor(effectiveIdentity(tr)), since: Math.round((tr.lastSeen - tr.firstSeen) / 1000) })),
+    label: state.settings.cameraLabel || '',
+    emptySince: tracks.length ? null : state.emptySinceAt,
+    viewers: live?.viewers || 0,
+    tracks: tracks.map((tr) => ({ id: tr.id, label: labelFor(effectiveIdentity(tr)), since: state.presence.get(tr.id)?.enteredAt || null })),
   };
 }
 
-function maybePushFrame(now, tracks) {
+/** Tell the dashboard what the camera sees (cheap: the cloud link only sends when something changed). */
+function publishPresence(tracks = state.tracker?.tracks || []) {
+  if (cloud?.user) cloud.track(presenceMeta(tracks));
+}
+
+const dashboardsWantFrames = () => !!cloud?.presence.dashboards.some((d) => d.wantsFrames);
+
+function maybeSendFrame(now) {
   const s = state.settings;
-  if (!serverConfigured() || !s.serverPushFrames || framePushBusy || now - framePushAt < (s.serverFrameMs || 500)) return;
-  framePushBusy = true;
-  framePushAt = now;
-  framePushPromise = pushFrameNow(tracks).finally(() => {
-    framePushBusy = false;
-    framePushPromise = null;
+  if (!cloudLive() || s.shareLive === false || frameBusy || !dashboardsWantFrames() || now - lastFrameSent < (s.liveFrameMs || 1000)) return;
+  frameBusy = true;
+  lastFrameSent = now;
+  sendFrameNow().finally(() => {
+    frameBusy = false;
   });
 }
 
-async function pushFrameNow(tracks) {
-  const s = state.settings;
+async function sendFrameNow() {
   try {
-    const snap = await captureSnapshot(els.video, { maxWidth: 640, quality: 0.6 });
+    const snap = await captureSnapshot(els.video, { maxWidth: 480, quality: 0.5 });
     if (!snap?.blob) return;
-    const res = await fetch(`${serverBase()}/api/camera/frame?meta=${encodeURIComponent(JSON.stringify(presenceMeta(tracks)))}`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${s.serverToken}`, 'Content-Type': 'image/jpeg' },
-      body: snap.blob,
-    });
-    if (!res.ok) throw new Error(`server responded ${res.status}`);
-    if (state.serverOk !== true) {
-      state.serverOk = true;
-      updateStoreStatus();
-    }
+    const jpeg = await blobToBase64(snap.blob);
+    await cloud.send('frame', { jpeg, w: snap.width, h: snap.height });
   } catch (e) {
-    if (state.serverOk !== false) {
-      log(`Home server: ${mixedContent() ? MIXED_HINT : e.message}`, 'error');
-      state.serverOk = false;
-      updateStoreStatus();
-    }
+    console.warn('live frame', e.message);
   }
 }
 
-function pushPresence(meta) {
-  if (!serverConfigured()) return Promise.resolve();
-  return fetch(`${serverBase()}/api/camera/presence`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${state.settings.serverToken}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(meta),
-  }).catch(() => {});
+function setArmed(armed, source = 'camera') {
+  if (state.armed === armed) return;
+  state.armed = armed;
+  localSet('hr.armed', armed);
+  updateArmedUI();
+  log(armed ? `Alarm armed${source === 'dashboard' ? ' from the dashboard' : ''}` : `Alarm disarmed${source === 'dashboard' ? ' from the dashboard' : ''}`, 'warn');
+  publishPresence();
+  if (source === 'camera' && cloud?.user) {
+    cloud.setHome({ armed }).catch((e) => log(`Cloud: ${e.message}`, 'error'));
+    cloud.addActivity('security', armed ? '🔒 Camera armed' : '🔓 Camera disarmed', { source: 'camera' }).catch(() => {});
+  }
 }
 
-/** Listen for commands from the dashboard (arm, disarm, start, stop). */
-function connectServerEvents() {
-  state.serverEs?.close();
-  state.serverEs = null;
-  if (!serverConfigured()) return;
-  const es = new EventSource(`${serverBase()}/api/events?token=${encodeURIComponent(state.settings.serverToken)}`);
-  state.serverEs = es;
-  es.addEventListener('command', (ev) => {
-    let c = null;
-    try {
-      c = JSON.parse(ev.data);
-    } catch {
-      return;
-    }
-    handleServerCommand(c);
-  });
-  es.onopen = () => {
-    if (state.serverOk !== true) {
-      state.serverOk = true;
-      updateStoreStatus();
-    }
-  };
-  es.onerror = () => {
-    if (state.serverOk !== false) {
-      state.serverOk = false;
-      updateStoreStatus();
-      if (mixedContent()) log(`Home server: ${MIXED_HINT}`, 'error');
-    }
-  };
-}
-
-function handleServerCommand(c) {
+function handleCloudCommand(c) {
+  if (!c || c.target !== 'camera') return;
+  const ok = (extra = {}) => cloud.reply(c, extra);
   switch (c.action) {
     case 'arm':
-    case 'disarm': {
-      const armed = c.action === 'arm';
-      if (state.armed !== armed) {
-        state.armed = armed;
-        localSet('hr.armed', armed);
-        updateArmedUI();
-        log(`${armed ? 'Armed' : 'Disarmed'} from the dashboard`, 'warn');
-        pushPresence(presenceMeta(state.tracker?.tracks || []));
-      }
+    case 'disarm':
+      setArmed(c.action === 'arm', 'dashboard');
+      ok({ armed: state.armed });
       break;
-    }
     case 'start':
       if (!state.running) startCamera();
+      ok({ running: true });
       break;
     case 'stop':
       if (state.running) stopCamera();
+      ok({ running: false });
       break;
     case 'siren':
-      siren.start(3);
+      siren.start(Number(c.params?.seconds) || 3);
       log('Siren test from the dashboard', 'warn');
+      ok();
+      break;
+    case 'snapshot':
+      if (state.running) takeSnapshot();
+      ok();
+      break;
+    case 'status':
+      ok({ presence: presenceMeta(state.tracker?.tracks || []) });
       break;
     default:
-      break;
+      cloud.reply(c, { ok: false, error: `Unknown command "${c.action}"` });
   }
 }
 
-async function testServer() {
-  const next = readSettingsForm();
-  if (!next.serverUrl || !next.serverToken) return toast('Enter the server URL and token first', 'error');
-  const base = next.serverUrl.trim().replace(/\/$/, '');
-  els.serverStatus.textContent = 'Testing…';
-  try {
-    const res = await fetch(`${base}/api/status`, { headers: { Authorization: `Bearer ${next.serverToken.trim()}` } });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
-    els.serverStatus.textContent = `Connected to home server v${json.version}${json.mock ? ' (mock devices)' : ''}`;
-    toast('Home server reachable. Save settings to use it.');
-  } catch (e) {
-    els.serverStatus.textContent = `Failed: ${e.message}`;
-    toast(`Home server: ${e.message}${location.protocol === 'https:' && base.startsWith('http:') ? ' (this page is HTTPS, so the server must be HTTPS too)' : ''}`, 'error');
+/** The shared room row changed (dashboard armed/disarmed, alarm cleared, renamed). */
+function syncHomeFromCloud(home) {
+  state.home = home;
+  if (home.armed !== state.armed) setArmed(home.armed, 'dashboard');
+  if (!home.alarm && state.alarmActive) dismissAlarm({ fromCloud: true });
+}
+
+function cloudConfig() {
+  return readCloudConfig(CLOUD);
+}
+
+async function initCloud() {
+  const cfg = cloudConfig();
+  if (!cfg.configured) {
+    cloud = null;
+    await store.configure({});
+    renderGate();
+    return;
   }
+  try {
+    cloud = new Cloud({ url: cfg.url, anonKey: cfg.anonKey, role: 'camera' });
+    await cloud.init();
+  } catch (e) {
+    toast(`Cloud: ${e.message}`, 'error');
+    cloud = null;
+    await store.configure({});
+    renderGate();
+    return;
+  }
+  cloud.on('command', handleCloudCommand);
+  cloud.onTable('home', (ev) => {
+    if (ev.new) syncHomeFromCloud(homeFromRow(ev.new));
+  });
+  cloud.onPresence(updateStoreStatus);
+  cloud.onStatus(updateStoreStatus);
+  cloud.onAuth((user) => {
+    if (!user) {
+      cloud.leave().catch(() => {});
+      store.configure({}).then(() => loadProfiles());
+      renderGate();
+      updateStoreStatus();
+    }
+  });
+  if (cloud.user) await enterCloud();
+  else renderGate();
+}
+
+/** Signed in: use the cloud for storage, announce the camera, follow the room state. */
+async function enterCloud() {
+  hideGate();
+  await store.configure({ client: cloud.client });
+  try {
+    syncHomeFromCloud(await cloud.getHome());
+  } catch (e) {
+    log(`Cloud: ${e.message}`, 'error');
+  }
+  if (!live) live = new LivePublisher(cloud, { getStream: () => state.stream, onChange: () => publishPresence() });
+  await cloud.join(presenceMeta(state.tracker?.tracks || []));
+  updateStoreStatus();
+}
+
+// ---------------------------------------------------------------- sign-in screen
+function renderGate() {
+  const g = els.gate;
+  if (!g) return;
+  const cfg = cloudConfig();
+  const signedIn = !!cloud?.user;
+  const show = !signedIn && !state.gateSkipped;
+  g.classList.toggle('hidden', !show);
+  g.setAttribute('aria-hidden', show ? 'false' : 'true');
+  els.gateSetup.open = !cfg.configured;
+  els.gateSetup.classList.toggle('hidden', cfg.source === 'baked');
+  els.gateProject.textContent = cfg.configured ? `Project: ${cfg.url.replace(/^https?:\/\//, '')}` : 'No cloud project on this device yet';
+  els.gateError.classList.add('hidden');
+  if (show) setTimeout(() => els.gateForm.elements.email.focus(), 50);
+}
+
+function hideGate() {
+  els.gate?.classList.add('hidden');
+  els.gate?.setAttribute('aria-hidden', 'true');
+}
+
+async function gateSubmit(ev) {
+  ev.preventDefault();
+  const f = els.gateForm;
+  const email = f.elements.email.value.trim();
+  const password = f.elements.password.value;
+  const url = f.elements.url.value.trim();
+  const anonKey = f.elements.anonKey.value.trim();
+  const btn = f.querySelector('button[type="submit"]');
+  const fail = (msg) => {
+    els.gateError.textContent = msg;
+    els.gateError.classList.remove('hidden');
+  };
+  btn.disabled = true;
+  try {
+    if (!cloudConfig().configured || (url && anonKey)) {
+      if (!url || !anonKey) throw new Error('First-time setup: paste the project URL and the anon key from Supabase → Settings → API.');
+      saveCloudConfig({ url, anonKey });
+      if (cloud) await cloud.close().catch(() => {});
+      cloud = null;
+      await initCloud();
+      if (!cloud) throw new Error('Could not create the cloud client with those values.');
+    }
+    if (!email || !password) throw new Error('Enter your email and password.');
+    await cloud.signIn(email, password);
+    f.elements.password.value = '';
+    await enterCloud();
+    await loadProfiles();
+    await loadCalibration();
+    toast(`Signed in as ${cloud.user.email}`);
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderAccount() {
+  if (!els.accountInfo) return;
+  const cfg = cloudConfig();
+  if (!cfg.configured) els.accountInfo.textContent = 'No cloud project on this device. Sign in once to connect the dashboard: it asks for the project URL and anon key the first time.';
+  else if (!cloud?.user) els.accountInfo.textContent = `Project ${cfg.url.replace(/^https?:\/\//, '')} · not signed in. Visits stay in this browser until you sign in.`;
+  else els.accountInfo.textContent = `Signed in as ${cloud.user.email} · ${cloud.status === 'live' ? 'connected' : 'connecting'} · home agent ${cloud.presence.agent ? 'online' : 'offline'} · ${cloud.presence.dashboards.length} dashboard${cloud.presence.dashboards.length === 1 ? '' : 's'} watching`;
+  els.btnAccountSignIn.classList.toggle('hidden', !!cloud?.user);
+  els.btnAccountSignOut.classList.toggle('hidden', !cloud?.user);
+  els.btnCloudReset.classList.toggle('hidden', cfg.source !== 'local');
+}
+
+async function accountSignOut() {
+  if (!cloud) return;
+  await stopCamera();
+  await cloud.signOut().catch(() => {});
+  await store.configure({});
+  await loadProfiles();
+  await loadCalibration();
+  state.gateSkipped = false;
+  renderGate();
+  updateStoreStatus();
+  toast('Signed out');
+}
+
+async function cloudReset() {
+  if (!confirm('Forget the cloud project saved on this device? You will be asked for the URL and key again.')) return;
+  if (cloud) await cloud.signOut().catch(() => {});
+  clearCloudConfig();
+  if (cloud) await cloud.close().catch(() => {});
+  cloud = null;
+  await store.configure({});
+  await loadProfiles();
+  state.gateSkipped = false;
+  renderGate();
+  updateStoreStatus();
 }
 
 // ---------------------------------------------------------------- presence, events, alarm
@@ -615,7 +740,7 @@ function handlePresence(active, ended, now) {
   for (const tr of active) {
     let p = state.presence.get(tr.id);
     if (!p) {
-      p = { trackId: tr.id, eventId: null, eventPromise: null, alarmed: false, locked: false, notified: false, ai: null, aiIdentity: null, aiPending: false, aiTried: false };
+      p = { trackId: tr.id, enteredAt: Date.now(), eventId: null, eventPromise: null, alarmed: false, locked: false, notified: false, ai: null, aiIdentity: null, aiPending: false, aiTried: false };
       state.presence.set(tr.id, p);
       ensureRecording();
     }
@@ -662,10 +787,21 @@ function handlePresence(active, ended, now) {
     if (p) closeEvent(tr, p);
   }
   if (active.length === 0) {
-    if (state.emptySince == null) state.emptySince = now;
+    if (state.emptySince == null) {
+      state.emptySince = now;
+      state.emptySinceAt = new Date().toISOString();
+    }
     if (state.session && now - state.emptySince > s.clipTailSec * 1000) finalizeRecording();
+    if (state.occupied) {
+      state.occupied = false;
+      cloud?.user && cloud.addActivity('visit', '🚶 Room is empty again', { source: 'camera' }).catch(() => {});
+    }
   } else {
     state.emptySince = null;
+    if (!state.occupied && active.some((tr) => tr.identity.stable || now - tr.firstSeen > 2500)) {
+      state.occupied = true;
+      cloud?.user && cloud.addActivity('visit', active.length > 1 ? `👥 ${active.length} people entered the room` : '👤 Someone entered the room', { source: 'camera' }).catch(() => {});
+    }
   }
 }
 
@@ -822,7 +958,11 @@ async function fireAlarm(tr, p, message = 'Someone is in the room') {
   state.alarmActive = true;
   els.alarmText.textContent = `⚠️ ${message}`;
   els.alarmBanner.classList.remove('hidden');
-  pushPresence(presenceMeta(state.tracker?.tracks || []));
+  publishPresence();
+  if (cloud?.user) {
+    cloud.setHome({ alarm: true, alarmAt: new Date().toISOString() }).catch(() => {});
+    cloud.addActivity('alarm', `🚨 Alarm: ${message.toLowerCase()}`, { source: 'camera' }).catch(() => {});
+  }
   if (s.alarmEnabled) siren.start(s.alarmDurationSec);
   if (s.notifyEnabled) notify('⚠️ Room Guard', message);
   if (s.lockOnUnknown && s.lockWebhookUrl) {
@@ -833,11 +973,13 @@ async function fireAlarm(tr, p, message = 'Someone is in the room') {
   if (p.eventId) store.updateEvent(p.eventId, { alarmTriggered: true, lockTriggered: p.locked }).catch(() => {});
 }
 
-function dismissAlarm() {
+function dismissAlarm({ fromCloud = false } = {}) {
   siren.stop();
+  const was = state.alarmActive;
   state.alarmActive = false;
   els.alarmBanner.classList.add('hidden');
-  pushPresence(presenceMeta(state.tracker?.tracks || []));
+  publishPresence();
+  if (was && !fromCloud && cloud?.user) cloud.setHome({ alarm: false }).catch(() => {});
 }
 
 // ---------------------------------------------------------------- recording
@@ -1742,7 +1884,7 @@ function renderDiagnostics() {
     lines.push(`device: ${d.appleMobile ? 'iPhone / iPad' : 'desktop or other'} · ${d.userAgent}`);
   }
   lines.push(`mode: ${presenceMode() ? 'record every visit' : 'identify people'} · timing: pose ${t.pose.toFixed(0)} ms · hair ${t.hair.toFixed(0)} ms · face ${t.face.toFixed(0)} ms · ${state.fps.value.toFixed(1)} fps`);
-  lines.push(`storage: ${store.remote ? 'supabase' : 'browser'} · calibration: ${state.calibration ? 'yes' : 'no'} · people: ${state.profiles.length} (${state.profiles.filter((p) => p.faceDescriptors?.length).length} with face samples)`);
+  lines.push(`storage: ${store.remote ? 'cloud' : 'browser'} · calibration: ${state.calibration ? 'yes' : 'no'} · people: ${state.profiles.length} (${state.profiles.filter((p) => p.faceDescriptors?.length).length} with face samples)`);
   lines.push(`claude: ${state.settings.aiEnabled ? (ai.ready ? `on (${state.settings.aiModel}), ${ai.callsInLastHour()} calls this hour` : 'enabled but no API key') : 'off'}`);
   els.diagnostics.textContent = lines.join('\n');
 }
@@ -1778,14 +1920,8 @@ async function applySettings(next, { reconnect = true } = {}) {
   els.videoWrap.classList.toggle('mirror', !!next.mirror);
   state.tracker?.setOptions({ threshold: next.matchThreshold, margin: next.matchMargin });
   if (state.recorder) state.recorder.maxSec = next.clipMaxSec;
-  const serverChanged = prev.serverUrl !== next.serverUrl || prev.serverToken !== next.serverToken;
-  if (reconnect && (serverChanged || prev.supabaseUrl !== next.supabaseUrl || prev.supabaseAnonKey !== next.supabaseAnonKey)) {
-    state.serverOk = null;
-    await store.configure(next);
-    connectServerEvents();
-    await loadProfiles();
-    await loadCalibration();
-  }
+  if (reconnect && prev.cameraLabel !== next.cameraLabel) await loadCalibration();
+  publishPresence();
   updateStoreStatus();
 }
 
@@ -1793,33 +1929,6 @@ async function saveSettingsForm(ev) {
   ev.preventDefault();
   await applySettings(readSettingsForm());
   toast('Settings saved');
-}
-
-async function signIn() {
-  const next = readSettingsForm();
-  const password = els.supabasePassword.value;
-  if (!next.supabaseUrl || !next.supabaseAnonKey) return toast('Enter the Supabase URL and anon key first', 'error');
-  await applySettings(next, { reconnect: false });
-  try {
-    await store.configure(next);
-    if (!store.remote) throw new Error(store.lastError?.message || 'Supabase client could not be created');
-    if (next.supabaseEmail && password) await store.signIn(next.supabaseEmail, password);
-    els.supabasePassword.value = '';
-    await loadProfiles();
-    await loadCalibration();
-    updateStoreStatus();
-    toast(store.user ? `Signed in as ${store.user.email}` : 'Connected. Sign in to read and write data.');
-  } catch (e) {
-    updateStoreStatus();
-    toast(e.message, 'error');
-  }
-}
-
-async function signOut() {
-  await store.signOut().catch(() => {});
-  updateStoreStatus();
-  await loadProfiles();
-  toast('Signed out');
 }
 
 async function refreshStorageInfo() {
@@ -1872,7 +1981,6 @@ async function importData(file) {
     importLocalData(JSON.parse(await file.text()));
     state.settings = loadSettings();
     renderSettings();
-    await store.configure(state.settings);
     await loadProfiles();
     await loadCalibration();
     toast('Import complete');
@@ -1882,8 +1990,10 @@ async function importData(file) {
 }
 
 async function wipeLocal() {
-  if (!confirm('Delete all settings, people, events and clips stored in this browser? Supabase data is not touched.')) return;
+  if (!confirm('Delete all settings, people, events and clips stored in this browser? Cloud data is not touched.')) return;
   await stopCamera();
+  if (cloud) await cloud.signOut().catch(() => {});
+  clearCloudConfig();
   for (const k of ['hr.settings.v1', 'hr.armed', ...Object.values(LOCAL_KEYS)]) localStorage.removeItem(k);
   await new Promise((resolve) => {
     const req = indexedDB.deleteDatabase('hr-clips');
@@ -1918,10 +2028,7 @@ function bind() {
   els.btnStop.addEventListener('click', stopCamera);
   els.btnArm.addEventListener('click', () => {
     siren.unlock();
-    state.armed = !state.armed;
-    localSet('hr.armed', state.armed);
-    updateArmedUI();
-    log(state.armed ? 'Alarm armed' : 'Alarm disarmed', 'warn');
+    setArmed(!state.armed, 'camera');
     if (state.armed && !presenceMode() && !state.profiles.length) toast('Nobody is enrolled yet, so every visitor counts as unknown once they are clearly seen.', 'error');
     if (state.armed && presenceMode()) toast(`Armed: the siren sounds when someone is in the room for ${state.settings.unknownGraceSec} s.`);
   });
@@ -1998,21 +2105,19 @@ function bind() {
   els.btnCalibClear.addEventListener('click', clearCalibration);
 
   els.settingsForm.addEventListener('submit', saveSettingsForm);
-  els.btnTestServer.addEventListener('click', testServer);
-  els.settingsForm.elements.serverUrl.addEventListener('input', (e) => {
-    els.serverStatus.textContent = mixedContent(e.target.value) ? `Warning: ${MIXED_HINT}` : '';
+  els.gateForm.addEventListener('submit', gateSubmit);
+  els.gateSkip.addEventListener('click', (e) => {
+    e.preventDefault();
+    state.gateSkipped = true;
+    hideGate();
+    toast('Working from browser storage. Sign in any time from Settings → Account.');
   });
-  els.btnUseServerLock.addEventListener('click', () => {
-    const f = els.settingsForm;
-    const url = f.elements.serverUrl.value.trim().replace(/\/$/, '');
-    if (!url) return toast('Enter the server URL first', 'error');
-    f.elements.lockWebhookUrl.value = `${url}/api/door/lock`;
-    f.elements.lockWebhookToken.value = f.elements.serverToken.value.trim();
-    f.elements.lockOnUnknown.checked = true;
-    toast('Door lock now goes through the home server. Save settings to apply.');
+  els.btnAccountSignIn.addEventListener('click', () => {
+    state.gateSkipped = false;
+    renderGate();
   });
-  els.btnSignIn.addEventListener('click', signIn);
-  els.btnSignOut.addEventListener('click', signOut);
+  els.btnAccountSignOut.addEventListener('click', accountSignOut);
+  els.btnCloudReset.addEventListener('click', cloudReset);
   els.btnRequestNotify.addEventListener('click', async () => {
     const r = await requestNotificationPermission();
     toast(r === 'granted' ? 'Notifications allowed' : `Notifications: ${r}`, r === 'granted' ? '' : 'error');
@@ -2046,8 +2151,7 @@ async function init() {
   updateArmedUI();
   applyMode();
   ai.configure({ apiKey: state.settings.aiApiKey });
-  await store.configure(state.settings);
-  connectServerEvents();
+  await initCloud();
   await loadProfiles();
   await loadCalibration();
   listCameras();
@@ -2057,6 +2161,6 @@ async function init() {
 }
 
 // Exposed for debugging and the end-to-end test.
-window.roomGuard = { state, store, siren, ai, startCamera, stopCamera, identify, summarizeTrack };
+window.roomGuard = { state, store, siren, ai, startCamera, stopCamera, identify, summarizeTrack, get cloud() { return cloud; }, get live() { return live; } };
 
 init();

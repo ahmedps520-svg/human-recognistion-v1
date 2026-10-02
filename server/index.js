@@ -359,10 +359,11 @@ async function main() {
   if (args.mock) {
     const app = createServer(config);
     const addr = await app.listen();
-    console.log(`Room Guard home server v${VERSION} (MOCK devices: nothing is wired, everything is simulated)`);
-    console.log(`  dashboard:  http://localhost:${addr.port}/dashboard.html?token=${config.token}`);
-    for (const ip of lanAddresses()) console.log(`              http://${ip}:${addr.port}/dashboard.html?token=${config.token}`);
+    console.log(`Room Guard LAN server v${VERSION} (MOCK devices: nothing is wired, everything is simulated)`);
+    console.log(`  api:        http://localhost:${addr.port}/api/status`);
+    for (const ip of lanAddresses()) console.log(`              http://${ip}:${addr.port}/api/status`);
     console.log(`  token:      ${config.token}`);
+    console.log('  The dashboard now runs from the cloud: use "npm run agent:mock" instead to see simulated devices there.');
     const shutdown = () => app.close().then(() => process.exit(0));
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
@@ -383,11 +384,12 @@ async function main() {
   const app = createServer(config);
   const addr = await app.listen();
   const scheme = config.https?.cert ? 'https' : 'http';
-  console.log(`Room Guard home server v${VERSION}${config.mock ? ' (MOCK devices)' : ''}`);
-  console.log(`  dashboard:  ${scheme}://localhost:${addr.port}/dashboard.html`);
-  for (const ip of lanAddresses()) console.log(`              ${scheme}://${ip}:${addr.port}/dashboard.html`);
+  console.log(`Room Guard LAN server v${VERSION}${config.mock ? ' (MOCK devices)' : ''}`);
+  console.log(`  api:        ${scheme}://localhost:${addr.port}/api/status`);
+  for (const ip of lanAddresses()) console.log(`              ${scheme}://${ip}:${addr.port}/api/status`);
   console.log(`  token:      ${config.token}`);
   console.log(`  data:       ${config.dataDir}`);
+  console.log('  The dashboard and camera app now connect through the cloud; run "npm run agent" for devices.');
   const shutdown = () => app.close().then(() => process.exit(0));
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);

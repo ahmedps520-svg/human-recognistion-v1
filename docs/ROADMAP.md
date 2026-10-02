@@ -19,6 +19,7 @@ always on and physical.
 - [x] Home server (Node, no dependencies) with dashboard: live feed, visits, Minecraft, AC, door, Govee lights, remote arm/disarm.
 - [x] Smart-room dashboard: modes, scenes, automation engine, switches, sensors, weather, phone alerts, activity timeline, premium realtime UI.
 - [x] "Record every visit" as the default mode: pose-only detection, visit events with entered/left times, multi-part clips; identification is the optional advanced mode.
+- [x] One link, one sign-in: camera app, dashboard and home agent connected through a Supabase project (tables + realtime), device-to-device live video, no ports or tokens.
 - [ ] Field test with the whole family for two weeks; tune weights and sigmas from confirmed events.
 
 ## Phase 2 — Accuracy (months 3–4)
@@ -35,12 +36,10 @@ always on and physical.
 ## Phase 3 — Always on (months 5–7)
 - Dedicated device (Raspberry Pi 5 / Jetson / mini PC) running a kiosk browser
   or a Node/Python port of the pipeline, with a watchdog and auto-restart.
-- Turn on Supabase sync (schema, client and sign-in already in the app) so
-  events and clips leave the laptop.
-- Supabase Edge Function to receive events and fan out push notifications
-  (Telegram / WhatsApp / email) and to call the lock.
-- Realtime dashboard (Supabase Realtime) so a phone can watch events and
-  arm/disarm remotely.
+- [x] Cloud sync of events and clips; realtime dashboard with remote arm/disarm.
+- Phone alerts without the PC: a Supabase Edge Function that fans out the
+  alarm (ntfy / Telegram / email) and calls the lock when the agent is off.
+- Run the agent on a Raspberry Pi so it is always on.
 - Privacy zones, schedules (auto-arm at night), and quiet hours.
 
 ## Phase 4 — Physical actions (months 8–10)

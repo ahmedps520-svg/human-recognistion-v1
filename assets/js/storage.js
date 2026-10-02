@@ -1,7 +1,9 @@
-// Persistence: Supabase (Postgres tables + Storage bucket) when configured,
-// otherwise localStorage + IndexedDB so the app is fully usable offline.
+// Persistence: the cloud project (Postgres tables + Storage bucket) when the
+// user is signed in, otherwise localStorage + IndexedDB so the app is fully
+// usable offline.
 
 import { LOCAL_KEYS, localGet, localSet } from './settings.js';
+import { profileFromRow, profileToRow, eventFromRow, eventToRow, eventPatchToRow as patchToRow } from './rows.js';
 
 const BUCKET = 'clips';
 const IDB_NAME = 'hr-clips';
@@ -9,88 +11,6 @@ const IDB_STORE = 'clips';
 const LOCAL_EVENT_CAP = 200;
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
-
-// ---------- row <-> object mapping ----------
-const profileFromRow = (r) => ({
-  id: r.id,
-  name: r.name,
-  heightCm: r.height_cm == null ? null : Number(r.height_cm),
-  weightKg: r.weight_kg == null ? null : Number(r.weight_kg),
-  hairLength: r.hair_length || 'short',
-  ageGroup: r.age_group || '',
-  faceDescriptors: Array.isArray(r.face_descriptors) ? r.face_descriptors : [],
-  faceThumbs: Array.isArray(r.face_thumbs) ? r.face_thumbs : [],
-  samples: Array.isArray(r.samples) ? r.samples : [],
-  color: r.color || '#4ade80',
-  alertOnEnter: !!r.alert_on_enter,
-  notes: r.notes || '',
-  createdAt: r.created_at,
-  updatedAt: r.updated_at,
-});
-
-const profileToRow = (p) => ({
-  id: p.id,
-  name: p.name,
-  height_cm: p.heightCm ?? null,
-  weight_kg: p.weightKg ?? null,
-  hair_length: p.hairLength || 'short',
-  age_group: p.ageGroup || null,
-  face_descriptors: p.faceDescriptors || [],
-  face_thumbs: p.faceThumbs || [],
-  samples: p.samples || [],
-  color: p.color || '#4ade80',
-  alert_on_enter: !!p.alertOnEnter,
-  notes: p.notes || '',
-  updated_at: new Date().toISOString(),
-});
-
-const eventFromRow = (r) => ({
-  id: r.id,
-  startedAt: r.started_at,
-  endedAt: r.ended_at,
-  verdict: r.verdict,
-  personId: r.person_id,
-  personName: r.person_name,
-  confidence: r.confidence == null ? null : Number(r.confidence),
-  features: r.features || {},
-  clipPath: r.clip_path,
-  clipPaths: Array.isArray(r.clip_paths) && r.clip_paths.length ? r.clip_paths : r.clip_path ? [r.clip_path] : [],
-  snapshotPath: r.snapshot_path,
-  alarmTriggered: !!r.alarm_triggered,
-  lockTriggered: !!r.lock_triggered,
-  confirmedPersonId: r.confirmed_person_id,
-  cameraLabel: r.camera_label,
-});
-
-const eventToRow = (e) => ({
-  id: e.id,
-  started_at: e.startedAt,
-  ended_at: e.endedAt ?? null,
-  verdict: e.verdict,
-  person_id: e.personId ?? null,
-  person_name: e.personName ?? null,
-  confidence: e.confidence ?? null,
-  features: e.features || {},
-  clip_path: e.clipPath ?? null,
-  clip_paths: e.clipPaths || (e.clipPath ? [e.clipPath] : []),
-  snapshot_path: e.snapshotPath ?? null,
-  alarm_triggered: !!e.alarmTriggered,
-  lock_triggered: !!e.lockTriggered,
-  confirmed_person_id: e.confirmedPersonId ?? null,
-  camera_label: e.cameraLabel ?? null,
-});
-
-const patchToRow = (patch) => {
-  const row = eventToRow(patch);
-  const out = {};
-  const keys = {
-    endedAt: 'ended_at', verdict: 'verdict', personId: 'person_id', personName: 'person_name', confidence: 'confidence',
-    features: 'features', clipPath: 'clip_path', clipPaths: 'clip_paths', snapshotPath: 'snapshot_path', alarmTriggered: 'alarm_triggered',
-    lockTriggered: 'lock_triggered', confirmedPersonId: 'confirmed_person_id', cameraLabel: 'camera_label',
-  };
-  for (const [k, col] of Object.entries(keys)) if (k in patch) out[col] = row[col];
-  return out;
-};
 
 // ---------- IndexedDB for local clips ----------
 function openIdb() {
@@ -156,34 +76,28 @@ export class Store {
     for (const fn of this.listeners) fn(this);
   }
 
-  /** (Re)configure from settings. Returns the active mode: server | supabase | local. */
-  async configure({ supabaseUrl, supabaseAnonKey, serverUrl, serverToken }) {
+  /**
+   * Use the cloud client (shared with the Cloud link) or fall back to this
+   * browser's storage. Returns the active mode: supabase | local.
+   */
+  async configure({ client = null } = {}) {
     this.lastError = null;
-    this.server = null;
-    if (serverUrl && serverToken) {
-      this.server = { base: serverUrl.trim().replace(/\/$/, ''), token: serverToken.trim() };
-      this.client = null;
-      this.user = null;
-      this.mode = 'server';
-      this._emit();
-      return this.mode;
-    }
-    if (supabaseUrl && supabaseAnonKey && window.supabase?.createClient) {
+    this._unsubAuth?.();
+    this._unsubAuth = null;
+    if (client) {
+      this.client = client;
+      this.mode = 'supabase';
       try {
-        this.client = window.supabase.createClient(supabaseUrl.trim(), supabaseAnonKey.trim(), {
-          auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
-        });
-        this.mode = 'supabase';
-        const { data } = await this.client.auth.getSession();
+        const { data } = await client.auth.getSession();
         this.user = data?.session?.user ?? null;
-        this.client.auth.onAuthStateChange((_event, session) => {
+        const { data: sub } = client.auth.onAuthStateChange((_event, session) => {
           this.user = session?.user ?? null;
           this._emit();
         });
+        this._unsubAuth = () => sub?.subscription?.unsubscribe?.();
       } catch (e) {
         this.lastError = e;
-        this.client = null;
-        this.mode = 'local';
+        this.user = null;
       }
     } else {
       this.client = null;
@@ -198,56 +112,9 @@ export class Store {
     return this.mode === 'supabase' && !!this.client;
   }
 
-  get isServer() {
-    return this.mode === 'server' && !!this.server;
-  }
-
-  async _api(path, { method = 'GET', body, raw, contentType } = {}) {
-    const headers = { Authorization: `Bearer ${this.server.token}` };
-    if (raw) headers['Content-Type'] = contentType || 'application/octet-stream';
-    else if (body) headers['Content-Type'] = 'application/json';
-    let res;
-    try {
-      res = await fetch(`${this.server.base}${path}`, { method, headers, body: raw ?? (body ? JSON.stringify(body) : undefined) });
-    } catch (e) {
-      const err = new Error(`Home server unreachable: ${e.message}`);
-      this.lastError = err;
-      throw err;
-    }
-    const text = await res.text();
-    let json = null;
-    try {
-      json = text ? JSON.parse(text) : null;
-    } catch {
-      json = null;
-    }
-    if (!res.ok) {
-      const err = new Error(json?.error || `Home server responded ${res.status}`);
-      this.lastError = err;
-      throw err;
-    }
-    return json;
-  }
-
   /** True when writes will succeed: local mode, or signed in to Supabase. */
   get ready() {
     return !this.remote || !!this.user;
-  }
-
-  async signIn(email, password) {
-    if (!this.remote) throw new Error('Supabase is not configured');
-    const { data, error } = await this.client.auth.signInWithPassword({ email, password });
-    if (error) throw error;
-    this.user = data.user;
-    this._emit();
-    return data.user;
-  }
-
-  async signOut() {
-    if (!this.remote) return;
-    await this.client.auth.signOut();
-    this.user = null;
-    this._emit();
   }
 
   _throw(error, what) {
@@ -259,11 +126,6 @@ export class Store {
 
   // ---------- profiles ----------
   async listProfiles() {
-    if (this.isServer) {
-      const profiles = await this._api('/api/camera/profiles');
-      localSet(LOCAL_KEYS.profiles, profiles);
-      return profiles;
-    }
     if (this.remote && this.user) {
       const { data, error } = await this.client.from('profiles').select('*').order('created_at', { ascending: true });
       if (error) this._throw(error, 'Loading people failed');
@@ -276,16 +138,6 @@ export class Store {
 
   async saveProfile(profile) {
     const p = { ...profile, id: profile.id || uuid() };
-    if (this.isServer) {
-      const all = await this._api('/api/camera/profiles');
-      const idx = all.findIndex((x) => x.id === p.id);
-      p.updatedAt = new Date().toISOString();
-      if (idx >= 0) all[idx] = p;
-      else all.push({ ...p, createdAt: p.updatedAt });
-      await this._api('/api/camera/profiles', { method: 'PUT', body: all });
-      localSet(LOCAL_KEYS.profiles, all);
-      return p;
-    }
     if (this.remote && this.user) {
       const { data, error } = await this.client.from('profiles').upsert(profileToRow(p)).select().single();
       if (error) this._throw(error, 'Saving person failed');
@@ -304,10 +156,6 @@ export class Store {
   }
 
   async deleteProfile(id) {
-    if (this.isServer) {
-      const all = (await this._api('/api/camera/profiles')).filter((x) => x.id !== id);
-      await this._api('/api/camera/profiles', { method: 'PUT', body: all });
-    }
     if (this.remote && this.user) {
       const { error } = await this.client.from('profiles').delete().eq('id', id);
       if (error) this._throw(error, 'Deleting person failed');
@@ -317,7 +165,6 @@ export class Store {
 
   // ---------- events ----------
   async listEvents({ limit = 60 } = {}) {
-    if (this.isServer) return this._api(`/api/camera/events?limit=${limit}`);
     if (this.remote && this.user) {
       const { data, error } = await this.client
         .from('events')
@@ -332,7 +179,6 @@ export class Store {
 
   async insertEvent(event) {
     const e = { ...event, id: event.id || uuid() };
-    if (this.isServer) return this._api('/api/camera/events', { method: 'POST', body: e });
     if (this.remote && this.user) {
       const { data, error } = await this.client.from('events').insert(eventToRow(e)).select().single();
       if (error) this._throw(error, 'Saving event failed');
@@ -350,7 +196,6 @@ export class Store {
   }
 
   async updateEvent(id, patch) {
-    if (this.isServer) return this._api(`/api/camera/events/${encodeURIComponent(id)}`, { method: 'PUT', body: patch });
     if (this.remote && this.user) {
       const { data, error } = await this.client.from('events').update(patchToRow(patch)).eq('id', id).select().single();
       if (error) this._throw(error, 'Updating event failed');
@@ -365,10 +210,6 @@ export class Store {
   }
 
   async deleteEvent(event) {
-    if (this.isServer) {
-      await this._api(`/api/camera/events/${encodeURIComponent(event.id)}`, { method: 'DELETE' });
-      return;
-    }
     if (this.remote && this.user) {
       const { error } = await this.client.from('events').delete().eq('id', event.id);
       if (error) this._throw(error, 'Deleting event failed');
@@ -383,10 +224,6 @@ export class Store {
   // ---------- media ----------
   /** Upload a clip or snapshot. Returns the storage path. */
   async uploadMedia(blob, path, contentType) {
-    if (this.isServer) {
-      await this._api(`/api/camera/media/${path}`, { method: 'PUT', raw: blob, contentType });
-      return path;
-    }
     if (this.remote && this.user) {
       const { error } = await this.client.storage.from(BUCKET).upload(path, blob, { contentType, upsert: true });
       if (error) this._throw(error, 'Upload failed');
@@ -399,7 +236,6 @@ export class Store {
   /** Resolve a storage path to a URL the <video>/<img> can load. */
   async mediaUrl(path) {
     if (!path) return null;
-    if (this.isServer) return `${this.server.base}/api/camera/media/${path}?token=${encodeURIComponent(this.server.token)}`;
     if (this.remote && this.user) {
       const { data, error } = await this.client.storage.from(BUCKET).createSignedUrl(path, 3600);
       if (error) this._throw(error, 'Could not get media link');
@@ -415,11 +251,6 @@ export class Store {
 
   // ---------- cameras / calibration ----------
   async loadCalibration(cameraLabel) {
-    if (this.isServer) {
-      const r = await this._api(`/api/camera/calibration?label=${encodeURIComponent(cameraLabel || 'default')}`);
-      localSet(LOCAL_KEYS.calibration, r.calibration ?? null);
-      return r.calibration ?? null;
-    }
     if (this.remote && this.user && cameraLabel) {
       const { data, error } = await this.client.from('cameras').select('calibration').eq('label', cameraLabel).maybeSingle();
       if (!error && data?.calibration) {
@@ -432,10 +263,6 @@ export class Store {
 
   async saveCalibration(cameraLabel, calibration) {
     localSet(LOCAL_KEYS.calibration, calibration);
-    if (this.isServer) {
-      await this._api(`/api/camera/calibration?label=${encodeURIComponent(cameraLabel || 'default')}`, { method: 'PUT', body: { calibration } });
-      return calibration;
-    }
     if (this.remote && this.user && cameraLabel) {
       const { error } = await this.client
         .from('cameras')

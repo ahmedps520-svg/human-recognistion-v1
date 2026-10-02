@@ -1,36 +1,46 @@
-# Room Guard home server
+# Home agent (and the optional LAN server)
 
-A single Node.js process (no dependencies) that runs on a computer at home
-and gives you one place for everything:
-
-- receives the **live camera feed** and **visit log** from the Room Guard
-  tab and stores clips and snapshots on disk (`server/data/`);
-- serves the **dashboard** (`/dashboard.html`) and the camera app itself;
-- controls the **Minecraft server** (status, players, start / stop /
-  restart, RCON console), the **air conditioning**, the **door switch**
-  and the **Govee lights** behind a token-protected JSON API.
+The **home agent** is the one process that runs at home, on the PC, and
+talks to the real devices: the Minecraft server, the air conditioning, the
+door switch, Govee lights, plugs and switches, Home Assistant sensors,
+outdoor weather and phone alerts. It signs in to the same cloud project as
+the dashboard and the camera app, so there are no ports, tokens or
+addresses to type anywhere.
 
 ## Run it
 
 ```
-npm run server            # uses server/config.json (created with a token on first run)
-npm run server:mock       # demo with simulated devices, token "demo-token-change-me"
-node server/index.js --mock --port 9000      # the same, with options
-node server/index.js --config C:\path\to\other-config.json
+npm install               # once (installs supabase-js for the agent)
+npm run agent:mock        # simulated devices, to try the dashboard
+npm run agent             # real devices from server/config.json
+npm run agent -- --login  # sign in again with another account
 ```
 
 On Windows, open PowerShell or Command Prompt **inside the project folder**
-first (in File Explorer, open the folder, then type `cmd` in the address bar
-and press Enter). When Windows Firewall asks, allow Node.js on private
-networks so your iPad can reach the server.
+first (in File Explorer, open the folder, then type `cmd` in the address
+bar and press Enter). The first run asks for the project URL + anon key
+(unless they are baked into the site, see
+[docs/CLOUD-SETUP.md](../docs/CLOUD-SETUP.md)) and then for your email +
+password; both are remembered on this PC (`server/data/agent-auth.json`
+holds the session, never the password). Leave the window open: the
+dashboard header shows **agent on** while it runs. To start it with
+Windows, add a Task Scheduler task that runs `npm run agent` in the project
+folder at logon.
 
-Then open `http://<that computer>:8787/dashboard.html`, press **Connect**
-and paste the token the server printed. Copy `server/config.example.json`
-to `server/config.json` and fill in the devices you have; every device is
-optional. Restart the server after editing the config.
-
-Useful environment variables: `PORT`, `HOME_SERVER_TOKEN`, `GOVEE_API_KEY`,
+Copy `server/config.example.json` to `server/config.json` and fill in the
+devices you have; every device is optional. Restart the agent after
+editing the config. Useful environment variables: `GOVEE_API_KEY`,
 `HOME_SERVER_CONFIG` (path to another config file).
+
+What the agent does, continuously:
+
+- mirrors every device's state into the cloud (`device_states`) so the
+  dashboard shows it, polling cloud devices every 30 s and weather every 10 min;
+- carries out dashboard taps (door, AC, lights, plugs, scenes, Minecraft,
+  phone-alert test) and answers them;
+- follows the camera (who is in the room, armed, alarm) and the room row
+  (mode, automation switches) to run scenes and automations;
+- writes what it did to the activity timeline.
 
 ## Devices
 
@@ -38,7 +48,7 @@ Useful environment variables: `PORT`, `HOME_SERVER_TOKEN`, `GOVEE_API_KEY`,
 | --- | --- | --- |
 | Minecraft | `minecraft.host/port` for status; `minecraft.rcon` for the console and graceful stop; `startCommand`, `stopCommand`, `restartCommand` are shell commands run by the server (e.g. `systemctl start minecraft`, `docker start mc`, `screen -S mc -X stuff "stop\n"`). | Enable RCON in `server.properties` (`enable-rcon=true`, `rcon.password=…`). Status uses the normal server list ping, so it works without RCON. |
 | Air conditioning | `ac.adapter`: `sensibo` (cloud API key from the Sensibo app), `homeassistant` (`climate.*` entity), or `webhook` (URL templates with `{temp}`, `{mode}`, `{fan}`). | For an infrared-only AC, put a Broadlink/ESP IR blaster behind Home Assistant or a tiny webhook. |
-| Door switch | `door.adapter`: `shelly` (Gen1 or Gen2 relay), `tasmota`, `homeassistant` (`switch.*`, `lock.*` or `cover.*`), or `webhook`. `pulseMs > 0` makes "open" a momentary pulse (door strike, gate). | Room Guard's alarm can call `POST /api/door/lock`; use "Use the server for the door lock" in the camera app's Settings. |
+| Door switch | `door.adapter`: `shelly` (Gen1 or Gen2 relay), `tasmota`, `homeassistant` (`switch.*`, `lock.*` or `cover.*`), or `webhook`. `pulseMs > 0` makes "open" a momentary pulse (door strike, gate). | The "Intruder response" automation locks it when the camera alarm fires. |
 | Govee lights | `govee.apiKey` from the Govee Home app (Settings → Apply for API key). | Uses the Govee cloud API, so it works from anywhere. Power, brightness, colour and colour temperature. Rate limit is 10 000 calls/day. |
 
 Set `"mock": true` to simulate all devices while you build things.
@@ -49,7 +59,7 @@ Set `"mock": true` to simulate all devices while you build things.
 | --- | --- | --- |
 | Modes | – | Home / Away / Sleep / Guest, switched from the dashboard or by scenes; automations can be conditioned on the mode. |
 | Scenes | `scenes` (optional; defaults built in: I'm home, Wake up, Focus, Movie, Sleep, Away) | One tap runs a list of actions: `{device:'lights', all:{power,brightness,color,colorTempK}}`, `{device:'ac', set:{…}}`, `{device:'door', action}`, `{device:'switch', id, action}`, `{device:'switches', all:'off'}`, `{device:'camera', command:'arm'}`, `{device:'notify', title, message}`, `{device:'mode', mode}`, `{device:'scene', id}`. A scene with `mode` also sets the mode. |
-| Automations | `automations` (optional; defaults built in) | `trigger`: `{type:'alarm'}`, `{type:'presence'}` (someone entered), `{type:'empty', minutes:15}`, `{type:'schedule', at:'23:00'}`, `{type:'door', state:'open'}`, `{type:'armed', armed:true}`. Optional `conditions`: `{mode, armed, between:['22:00','07:00']}`. Toggles are saved in `data/automations.json`. Only "Intruder response" is on by default. |
+| Automations | `automations` (optional; defaults built in) | `trigger`: `{type:'alarm'}`, `{type:'presence'}` (someone entered), `{type:'empty', minutes:15}`, `{type:'schedule', at:'23:00'}`, `{type:'door', state:'open'}`, `{type:'armed', armed:true}`. Optional `conditions`: `{mode, armed, between:['22:00','07:00']}`. The on/off switches on the dashboard are kept in the cloud (`home.automations`). Only "Intruder response" is on by default. |
 | Plugs & switches | `switches: [{id, name, icon, adapter, shelly|tasmota|homeassistant|webhook}]` | Any relay, same adapters as the door. |
 | Sensors | `sensors: [{id, name, kind, unit, entityId}]` | Home Assistant sensor entities (temperature, humidity, co2, illuminance…). |
 | Weather | `location: {lat, lon, name}` | Outdoor conditions from Open-Meteo, no key needed. |
@@ -59,26 +69,17 @@ Set `"mock": true` to simulate all devices while you build things.
 
 ## Connecting the camera app
 
-In the camera app's **Settings → Home server**, enter the server URL and
-token and press **Test connection**. From then on visits, clips and
-snapshots are stored on the server, the live feed is sent every 500 ms,
-and the dashboard can arm and disarm the alarm.
+Nothing to configure: sign in on the iPad with the same email + password.
+The camera then shows up on the dashboard, arm/disarm works from anywhere,
+visits and clips go to the cloud, and the alarm reaches the agent's
+"Intruder response" automation (door locked, lights red, phone alert).
 
-The camera app is served over HTTPS (GitHub Pages), and browsers refuse to
-send data from an HTTPS page to a plain-HTTP server. Three ways to give the
-server HTTPS:
+## The LAN server (optional, legacy)
 
-1. **Tailscale (recommended).** Install Tailscale on the server machine and
-   on the iPad, then run `tailscale serve --bg 8787`. The server is then
-   reachable at `https://<machine>.<tailnet>.ts.net` with a valid
-   certificate, from home or anywhere, with nothing exposed to the internet.
-2. **Cloudflare Tunnel.** `cloudflared tunnel --url http://localhost:8787`
-   gives a public HTTPS hostname; protect it with Cloudflare Access.
-3. **Own certificate.** Set `https.cert` and `https.key` in the config (for
-   example from Let's Encrypt with a DDNS domain).
-
-Alternatively serve the camera app from the server itself (`http://…:8787/`)
-on the same machine, where `localhost` counts as secure.
+`npm run server` still starts the earlier token-protected JSON API on port
+8787 (`server/index.js`, `--mock` for simulated devices). The site no
+longer uses it; it remains for scripts and for anyone who prefers a local
+API. Its routes are listed below.
 
 ## API
 

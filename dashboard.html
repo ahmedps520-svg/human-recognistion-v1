@@ -8,8 +8,28 @@
   <meta name="theme-color" content="#0a0d14">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%A0%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="assets/css/dashboard.css">
+  <link rel="stylesheet" href="assets/css/gate.css">
 </head>
 <body class="dash">
+  <div id="gate" class="gate hidden" aria-hidden="true">
+    <form id="gateForm" class="gate-card" autocomplete="on">
+      <div class="gate-logo">🏠</div>
+      <h1>Welcome home</h1>
+      <p class="gate-sub">Sign in with your home account to see your room.</p>
+      <label>Email <input name="email" type="email" autocomplete="username" inputmode="email" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary gate-btn">Sign in</button>
+      <p id="gateError" class="gate-error hidden" role="alert"></p>
+      <details id="gateSetup" class="gate-setup">
+        <summary>First-time setup</summary>
+        <p class="muted small" id="gateProject"></p>
+        <p class="muted small">Once per device: paste the <b>Project URL</b> and the <b>anon public key</b> from your Supabase project (Settings → API). After that it is only email + password.</p>
+        <label>Project URL <input name="url" type="url" placeholder="https://xxxx.supabase.co" autocomplete="off"></label>
+        <label>Anon key <input name="anonKey" type="text" placeholder="eyJ…" autocomplete="off"></label>
+      </details>
+    </form>
+  </div>
+
   <div class="glow glow-a"></div>
   <div class="glow glow-b"></div>
 
@@ -27,6 +47,7 @@
     <div class="hero-right">
       <div class="chip" id="chipInside" title="Inside">🌡️ <b>–</b></div>
       <div class="chip" id="chipWeather" title="Outside">⛅ <b>–</b></div>
+      <div class="chip chip-agent off" id="chipAgent" title="The home agent on your PC talks to the real devices">🖥️ <b>agent off</b></div>
       <div class="clock"><span id="clock">--:--</span><small id="dateLine"></small></div>
       <button type="button" class="icon-btn" id="btnSettings" title="Connection and settings">⚙️</button>
     </div>
@@ -36,12 +57,14 @@
     <!-- Camera -->
     <section class="card camera" id="cardCamera">
       <div class="cam-wrap">
-        <img id="camStream" alt="Live camera" hidden>
+        <video id="camVideo" autoplay muted playsinline hidden></video>
+        <img id="camFrame" alt="Live camera" hidden>
         <div id="camOffline" class="cam-offline">
           <div class="big">📷</div>
-          <p>No live feed</p>
-          <p class="muted small">Open the camera app on the iPad, set the home server in its Settings and start the camera.</p>
+          <p id="camOfflineTitle">No live feed</p>
+          <p class="muted small" id="camOfflineHint">Open the camera app on the iPad, sign in with the same account and press Start camera.</p>
         </div>
+        <span class="chip chip-dark cam-quality" id="camQuality" hidden></span>
         <div class="cam-chips">
           <span class="chip chip-dark" id="camPeople">Nobody</span>
           <span class="chip chip-dark" id="camArmed">Disarmed</span>
@@ -54,7 +77,8 @@
         <div class="btns">
           <button type="button" id="btnArm" class="pill accent">Arm</button>
           <button type="button" id="btnDisarm" class="pill">Disarm</button>
-          <a class="pill" id="lnkSnapshot" href="#" target="_blank" rel="noopener">Snapshot</a>
+          <button type="button" id="btnCamStart" class="pill">Start camera</button>
+          <button type="button" id="btnSnapshot" class="pill">Snapshot</button>
           <a class="pill" id="lnkCameraApp" href="index.html" target="_blank" rel="noopener">Camera app</a>
         </div>
       </div>
@@ -177,18 +201,20 @@
   <aside id="sheet" class="sheet" aria-hidden="true">
     <div class="sheet-inner">
       <div class="title-row"><h2>Settings</h2><button type="button" class="icon-btn" id="btnSheetClose">✕</button></div>
-      <form id="connForm" class="form">
-        <label>Room name <input name="roomName" placeholder="My room" autocomplete="off"></label>
-        <label>Home server URL <input name="serverUrl" placeholder="http://192.168.1.20:8787" autocomplete="off"></label>
-        <label>Token <input name="token" type="password" autocomplete="off"></label>
-        <label>Camera app URL <input name="cameraUrl" placeholder="https://you.github.io/human-recognistion-v1/" autocomplete="off"></label>
-        <div class="btns"><button type="submit" class="pill accent">Save &amp; connect</button></div>
+      <form id="roomForm" class="form">
+        <label>Room name <input name="roomName" placeholder="My room" autocomplete="off" maxlength="40"></label>
+        <div class="btns"><button type="submit" class="pill accent">Save</button></div>
       </form>
       <div class="sheet-info muted small" id="serverInfo"></div>
-      <p class="muted small">The token is printed when the server starts and lives in <code>server/config.json</code>. Devices, scenes and automations are configured there too; see <code>server/README.md</code>.</p>
+      <div class="btns">
+        <button type="button" class="pill" id="btnSignOut">Sign out</button>
+        <button type="button" class="pill hidden" id="btnCloudReset">Forget this cloud project</button>
+      </div>
+      <p class="muted small">Everything on this page comes from your cloud project and updates live. Devices (door, AC, lights, plugs, Minecraft) are driven by the home agent running on your PC: <code>npm run agent</code>. Phone alerts and device settings live in <code>server/config.json</code>; see <code>server/README.md</code>.</p>
     </div>
   </aside>
 
+  <script src="vendor/supabase-js-2.116.0.umd.js"></script>
   <script type="module" src="assets/js/dashboard.js"></script>
 </body>
 </html>

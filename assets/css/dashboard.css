@@ -99,7 +99,14 @@ code { background: var(--glass-strong); padding: 0 .3em; border-radius: 6px; }
 
 /* ---------- camera ---------- */
 .cam-wrap { position: relative; background: #000; aspect-ratio: 16 / 9; }
-.cam-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cam-wrap img, .cam-wrap video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cam-wrap [hidden] { display: none; }
+.cam-quality { position: absolute; right: .7rem; top: .7rem; font-size: .72rem; opacity: .85; }
+.chip-agent.off { color: var(--muted); }
+.chip-agent.on { color: var(--ok); }
+.card.offline { opacity: .6; }
+.card.offline::after { content: 'home agent offline'; position: absolute; right: 1rem; top: .9rem; font-size: .7rem; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.card { position: relative; }
 .cam-offline { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; color: var(--muted); padding: 1rem; }
 .cam-offline .big { font-size: 2.4rem; }
 .cam-offline p { margin: .2rem 0; }

@@ -1,5 +1,44 @@
 # Release notes
 
+## 0.4.0 — One link, one sign-in (2 October 2026)
+
+No more server addresses, IP numbers or tokens. Everything is on the GitHub
+Pages link, and every device signs in with the same email + password.
+
+### What changed for you
+- **Sign-in screen** on both the camera app and the dashboard. Sign in on
+  one page of the site and the other is signed in too. The camera app can
+  still be used without signing in (browser storage only).
+- **Dashboard runs from the cloud.** The picture, who is in the room,
+  arm/disarm, door, modes, scenes, automations, climate, lights, plugs,
+  Minecraft, weather, visits and the timeline all come from your cloud
+  project and update live. Header chip shows whether the home agent is on.
+- **Live picture straight from the iPad** to the dashboard (WebRTC), with a
+  one-frame-per-second fallback when a direct connection is not possible.
+  "Start camera" / "Stop camera" and "Snapshot" from the dashboard.
+- **Home agent** (`npm run agent`) replaces the home server for devices:
+  same adapters (Govee, Sensibo, Shelly, Tasmota, Home Assistant, webhooks,
+  Minecraft, ntfy/Telegram), no ports, no tokens; it signs in once and
+  remembers the session. `npm run agent:mock` simulates every device.
+- Arm/disarm, alarm, mode and automation switches live in one shared room
+  row, so they survive a device being offline and every screen agrees.
+
+### Under the hood
+- `supabase/schema.sql` v2: `home`, `device_states`, `activity` tables,
+  realtime publication, same RLS (signed-in users only). Safe to re-run.
+- `assets/js/cloud.js`: one module for sign-in, tables, presence (throttled,
+  change-only), commands with replies, table change events; used unchanged
+  by the browser and by the agent in Node. `assets/js/live.js`: WebRTC
+  publisher/viewer. `assets/js/rows.js`: shared row mapping.
+- Settings: the Home server and Supabase sections are gone; an Account
+  section shows the sign-in state. Settings keys `serverUrl`, `serverToken`,
+  `serverPushFrames`, `serverFrameMs`, `supabase*` are no longer used.
+- Tests: cloud link unit tests, home agent tests, and a browser end-to-end
+  test that runs the camera app, the dashboard and the agent together
+  through `tests/fake-cloud/`, an in-memory Supabase look-alike.
+- The LAN JSON server (`npm run server`) remains as an optional extra.
+
+
 ## 0.3.0 — Smart-room dashboard (2 October 2026)
 
 Your room on one screen, updating live. The home server grew from a device

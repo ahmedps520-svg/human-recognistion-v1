@@ -7,8 +7,29 @@
   <meta name="description" content="Bedroom camera that recognises household members by height, build, hair length and face, records clips and raises an alarm for strangers.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%8F%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="assets/css/style.css">
+  <link rel="stylesheet" href="assets/css/gate.css">
 </head>
 <body>
+  <div id="gate" class="gate hidden" aria-hidden="true">
+    <form id="gateForm" class="gate-card" autocomplete="on">
+      <div class="gate-logo">🛏️</div>
+      <h1>Room Guard</h1>
+      <p class="gate-sub">Sign in with your home account. The dashboard, the camera and the home agent all share it.</p>
+      <label>Email <input name="email" type="email" autocomplete="username" inputmode="email" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="primary gate-btn">Sign in</button>
+      <p id="gateError" class="gate-error hidden" role="alert"></p>
+      <details id="gateSetup" class="gate-setup">
+        <summary>First-time setup</summary>
+        <p class="muted small" id="gateProject"></p>
+        <p class="muted small">Once per device: paste the <b>Project URL</b> and the <b>anon public key</b> from your Supabase project (Settings → API). After that it is only email + password.</p>
+        <label>Project URL <input name="url" type="url" placeholder="https://xxxx.supabase.co" autocomplete="off"></label>
+        <label>Anon key <input name="anonKey" type="text" placeholder="eyJ…" autocomplete="off"></label>
+      </details>
+      <p class="gate-foot"><a href="#" id="gateSkip">Use this device without signing in</a></p>
+    </form>
+  </div>
+
   <header class="topbar">
     <div class="brand">🛏️ Room Guard <span class="version" id="appVersion"></span></div>
     <nav class="tabs" id="tabs" aria-label="Sections">
@@ -201,6 +222,7 @@
           <label class="check"><input type="checkbox" name="alarmEnabled"> Sound the siren when armed (any person in "record every visit" mode, unknown people in "identify" mode)</label>
           <label>Siren duration (s) <input name="alarmDurationSec" type="number" min="1" max="300" step="1"></label>
           <label class="check"><input type="checkbox" name="notifyEnabled"> Browser notifications <button type="button" id="btnRequestNotify" class="inline">Allow</button></label>
+          <p class="muted small">Door lock: when you are signed in, the home agent's "Intruder response" automation locks the door and lights the room red. The webhook below is only for a direct lock without the agent.</p>
           <label>Door-lock webhook URL <input name="lockWebhookUrl" type="url" placeholder="https://your-home-assistant/api/webhook/lock-door"></label>
           <label>Webhook bearer token (optional) <input name="lockWebhookToken" type="password"></label>
           <label class="check"><input type="checkbox" name="lockOnUnknown"> Lock the door when the alarm fires</label>
@@ -248,7 +270,7 @@
 
         <fieldset>
           <legend>Browser storage</legend>
-          <p class="muted small">People, events and settings live in this browser's local storage; clips and snapshots in its IndexedDB. Nothing leaves your computer unless you configure the home server or Supabase below. Clearing site data or switching browsers starts from scratch, so export a backup now and then. Clips are downloaded one by one from the Events tab.</p>
+          <p class="muted small">Not signed in, people, events and settings live in this browser's local storage and clips in its IndexedDB; nothing leaves the device. Clearing site data or switching browsers starts from scratch, so export a backup now and then. Signed in, everything goes to your cloud project instead.</p>
           <div id="storageUsage" class="muted small">Storage usage: …</div>
           <div class="actions">
             <button type="button" id="btnPersist">Ask the browser to keep this data</button>
@@ -259,37 +281,17 @@
         </fieldset>
 
         <fieldset>
-          <legend>Home server (optional)</legend>
-          <p class="muted small">Run <code>npm run server</code> on a computer at home (see <code>server/README.md</code>). The camera then sends its live feed and visit log there, the dashboard can arm and disarm it remotely, and the door lock can go through the server. This page is served over HTTPS, so the server must be reachable over HTTPS as well; Tailscale makes that a one-liner.</p>
-          <label>Server URL <input name="serverUrl" type="url" placeholder="https://homeserver.tailnet.ts.net" autocomplete="off"></label>
-          <label>Token <input name="serverToken" type="password" autocomplete="off"></label>
-          <div class="row">
-            <label class="check"><input type="checkbox" name="serverPushFrames"> Send the live feed to the server</label>
-            <label>Frame interval (ms; 100 = 10 fps) <input name="serverFrameMs" type="number" min="50" max="5000" step="10"></label>
-          </div>
+          <legend>Account &amp; dashboard</legend>
+          <p class="muted small" id="accountInfo"></p>
           <div class="actions">
-            <button type="button" id="btnTestServer">Test connection</button>
-            <button type="button" id="btnUseServerLock">Use the server for the door lock</button>
-            <span id="serverStatus" class="muted small"></span>
+            <button type="button" id="btnAccountSignIn">Sign in</button>
+            <button type="button" id="btnAccountSignOut" class="hidden">Sign out</button>
+            <button type="button" id="btnCloudReset" class="danger-outline hidden">Forget the cloud project on this device</button>
           </div>
+          <label class="check"><input type="checkbox" name="shareLive"> Share the live picture with the dashboard (direct device-to-device video)</label>
+          <label>Fallback snapshot interval (ms) <input name="liveFrameMs" type="number" min="250" max="10000" step="50"></label>
+          <p class="muted small">Signed in, this camera appears on the dashboard: who is in the room, arm and disarm from anywhere, visits and clips in the cloud, and the home agent on your PC locks the door and lights up when the alarm fires. Clips upload to the cloud only while signed in.</p>
         </fieldset>
-
-        <fieldset>
-          <legend>Cloud sync with Supabase (optional, not needed yet)</legend>
-          <p class="muted small">For now everything stays in this browser. Fill this in later if you want people, events and clips in the cloud; <code>supabase/schema.sql</code> creates the tables. Leave empty to keep using browser storage.</p>
-          <label>Project URL <input name="supabaseUrl" type="url" placeholder="https://xxxx.supabase.co"></label>
-          <label>Anon (public) key <input name="supabaseAnonKey" type="password" placeholder="eyJ…"></label>
-          <div class="row">
-            <label>Email <input name="supabaseEmail" type="email" placeholder="you@example.com"></label>
-            <label>Password <input id="supabasePassword" type="password" placeholder="••••••••"></label>
-          </div>
-          <div class="actions">
-            <button type="button" id="btnSignIn">Save &amp; sign in</button>
-            <button type="button" id="btnSignOut">Sign out</button>
-            <span id="connStatus" class="muted small"></span>
-          </div>
-        </fieldset>
-
 
         <div class="actions sticky">
           <button type="submit" class="primary">Save settings</button>

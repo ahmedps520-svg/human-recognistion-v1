@@ -1,0 +1,25 @@
+/* Sign-in screen shared by the camera app and the dashboard. */
+.gate { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 1rem;
+  background: radial-gradient(1200px 600px at 20% -10%, rgba(99, 102, 241, .25), transparent 60%), radial-gradient(900px 500px at 110% 110%, rgba(16, 185, 129, .2), transparent 60%), rgba(8, 10, 16, .96);
+  backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); }
+.gate.hidden { display: none; }
+.gate-card { width: min(100%, 380px); display: grid; gap: .8rem; padding: 1.6rem 1.5rem 1.2rem; border-radius: 22px;
+  background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .12); box-shadow: 0 30px 80px rgba(0, 0, 0, .5); color: #e5e7eb; }
+.gate-card h1 { margin: 0; font-size: 1.5rem; text-align: center; letter-spacing: .01em; }
+.gate-logo { font-size: 2.6rem; text-align: center; line-height: 1; }
+.gate-sub { margin: 0; text-align: center; color: #9ca3af; font-size: .9rem; }
+.gate-card label { display: grid; gap: .3rem; font-size: .85rem; color: #cbd5e1; }
+.gate-card input { font: inherit; font-size: 1rem; padding: .7rem .8rem; border-radius: 12px; border: 1px solid rgba(255, 255, 255, .14); background: rgba(0, 0, 0, .3); color: #f3f4f6; }
+.gate-card input:focus { outline: 2px solid rgba(99, 102, 241, .7); outline-offset: 1px; }
+.gate-btn { font: inherit; font-size: 1rem; font-weight: 600; padding: .8rem; border-radius: 12px; border: 0; cursor: pointer;
+  background: linear-gradient(135deg, #6366f1, #22c55e); color: #fff; }
+.gate-btn:disabled { opacity: .6; cursor: wait; }
+.gate-error { margin: 0; padding: .6rem .8rem; border-radius: 10px; background: rgba(248, 113, 113, .15); border: 1px solid rgba(248, 113, 113, .4); color: #fecaca; font-size: .85rem; }
+.gate-error.hidden { display: none; }
+.gate-setup { border-top: 1px solid rgba(255, 255, 255, .1); padding-top: .6rem; display: grid; gap: .5rem; }
+.gate-setup.hidden { display: none; }
+.gate-setup summary { cursor: pointer; color: #a5b4fc; font-size: .9rem; }
+.gate-setup .muted { color: #9ca3af; margin: 0; }
+.gate-setup .small { font-size: .8rem; }
+.gate-foot { margin: 0; text-align: center; font-size: .85rem; }
+.gate-foot a { color: #9ca3af; }

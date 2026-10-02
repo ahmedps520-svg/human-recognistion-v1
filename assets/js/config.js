@@ -1,7 +1,17 @@
 // Central configuration: pinned asset URLs, landmark indices and default settings.
 // Everything here is plain data so it can be imported from Node tests as well as the browser.
 
-export const APP_VERSION = '0.3.0';
+export const APP_VERSION = '0.4.0';
+
+// The cloud project that connects the camera app, the dashboard and the home
+// agent. Both values are public (the anon key is meant to be shipped to
+// browsers; every table is locked down by row level security and needs a
+// signed-in user). Leave empty to run the camera app from browser storage only;
+// the sign-in screen then offers a one-time "first-time setup" box instead.
+export const CLOUD = {
+  supabaseUrl: '',
+  supabaseAnonKey: '',
+};
 
 // Heavy assets are fetched from pinned CDN locations. Point these at your own
 // hosting if you prefer to self-host (see vendor/README.md). The WASM runtime
@@ -81,14 +91,9 @@ export const DEFAULT_SETTINGS = {
   // 'presence': detect people, record each visit from entering to leaving, alarm when armed.
   // 'identify': additionally recognise who it is (enrollment, calibration, face models).
   mode: 'presence',
-  // Home server (server/): receives the live feed and visit log, relays dashboard commands
-  serverUrl: '',
-  serverToken: '',
-  serverPushFrames: true,
-  serverFrameMs: 100, // 10 frames per second to the dashboard
-  supabaseUrl: '',
-  supabaseAnonKey: '',
-  supabaseEmail: '',
+  // cloud: share the live picture with the dashboard (direct device-to-device video, JPEG fallback)
+  shareLive: true,
+  liveFrameMs: 1000, // JPEG fallback rate while a dashboard watches without a direct connection
   cameraDeviceId: '',
   cameraLabel: '',
   mirror: false,
