@@ -156,8 +156,9 @@ function colorFor(identity) {
 function updateStoreStatus() {
   const el = els.storeStatus;
   if (store.isServer) {
-    el.textContent = state.serverOk === false ? 'Home server · unreachable' : 'Home server';
+    el.textContent = state.serverOk === false ? (mixedContent() ? 'Home server · blocked (http from https)' : 'Home server · unreachable') : state.serverOk ? 'Home server · live' : 'Home server';
     el.className = `status-pill ${state.serverOk === false ? 'warn' : 'ok'}`;
+    el.title = state.serverOk === false && mixedContent() ? MIXED_HINT : 'Visits, clips and the live feed go to your home server';
   } else if (!store.remote) {
     el.textContent = 'Browser storage';
     el.className = 'status-pill';
@@ -469,6 +470,9 @@ function ema(key, ms) {
 // ---------------------------------------------------------------- home server link
 const serverConfigured = () => !!(state.settings.serverUrl && state.settings.serverToken);
 const serverBase = () => state.settings.serverUrl.trim().replace(/\/$/, '');
+/** An https page (GitHub Pages) is not allowed to talk to a plain-http server; browsers block it silently. */
+const mixedContent = (url = state.settings.serverUrl) => location.protocol === 'https:' && /^http:\/\//i.test((url || '').trim());
+const MIXED_HINT = 'this page is https, so Safari/Chrome block a plain http server. Open the camera app from the server\'s https address (Tailscale), or use https for the server URL.';
 let framePushAt = 0;
 let framePushBusy = false;
 let framePushPromise = null;
@@ -512,7 +516,7 @@ async function pushFrameNow(tracks) {
     }
   } catch (e) {
     if (state.serverOk !== false) {
-      log(`Home server: ${e.message}`, 'error');
+      log(`Home server: ${mixedContent() ? MIXED_HINT : e.message}`, 'error');
       state.serverOk = false;
       updateStoreStatus();
     }
@@ -554,6 +558,7 @@ function connectServerEvents() {
     if (state.serverOk !== false) {
       state.serverOk = false;
       updateStoreStatus();
+      if (mixedContent()) log(`Home server: ${MIXED_HINT}`, 'error');
     }
   };
 }
@@ -1994,6 +1999,9 @@ function bind() {
 
   els.settingsForm.addEventListener('submit', saveSettingsForm);
   els.btnTestServer.addEventListener('click', testServer);
+  els.settingsForm.elements.serverUrl.addEventListener('input', (e) => {
+    els.serverStatus.textContent = mixedContent(e.target.value) ? `Warning: ${MIXED_HINT}` : '';
+  });
   els.btnUseServerLock.addEventListener('click', () => {
     const f = els.settingsForm;
     const url = f.elements.serverUrl.value.trim().replace(/\/$/, '');
